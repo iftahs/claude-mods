@@ -1,0 +1,12 @@
+{
+  "name": "claude-mods",
+  "owner": { "name": "Iftah Saar", "url": "https://github.com/iftahs" },
+  "description": "Open-source mods for Claude Code: live panes, status lines and hooks that extend Claude Code's own interface",
+  "plugins": [
+    {
+      "name": "session-procs",
+      "source": "./mods/session-procs",
+      "description": "Live pane listing the processes this Claude Code session started: dev servers, tool shells and MCP servers"
+    }
+  ]
+}
