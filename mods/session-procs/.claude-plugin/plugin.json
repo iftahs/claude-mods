@@ -2,7 +2,7 @@
   "name": "session-procs",
   "version": "0.1.0",
   "description": "Live pane listing the processes this Claude Code session started: dev servers, tool shells and MCP servers, with memory, age and sparklines",
-  "author": { "name": "Iftah Saar", "url": "https://github.com/iftahs" },
+  "author": { "name": "Iftah Saar", "url": "https://iftah.dev" },
   "homepage": "https://github.com/iftahs/claude-mods/tree/main/mods/session-procs",
   "repository": "https://github.com/iftahs/claude-mods",
   "license": "MIT",

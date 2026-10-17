@@ -2,6 +2,21 @@
 
 A live pane that lists every process the current Claude Code session started, so a dev server you asked Claude to run never gets lost.
 
+<p>
+  <img alt="session-procs docked in the sidebar, dark theme" src="../../docs/screenshots/sidebar-dark.png" width="300">
+  &nbsp;
+  <img alt="session-procs docked in the sidebar, light theme" src="../../docs/screenshots/sidebar-light.png" width="300">
+</p>
+
+The screenshots use demo data. The wider layout, with PID and memory-meter columns, appears when you widen the pane:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../../docs/screenshots/wide-dark.png">
+  <img alt="session-procs in a wide pane, with PID, memory meter and age columns" src="../../docs/screenshots/wide-light.png" width="720">
+</picture>
+
+## What it shows
+
 - **Started by tools**: each Bash or PowerShell command Claude ran, titled with the command itself (`$ npm run dev`), and the processes under it (`node …/bin/next dev`) with PID, memory and age.
 - **Detached**: processes that kept running after the shell that started them exited.
 - **MCP servers & helpers**: the session's MCP servers and other helpers, behind a toggle.
@@ -51,3 +66,7 @@ It refreshes every 5 seconds while the pane is visible, every 30 seconds otherwi
 claude plugin validate mods/session-procs
 claude plugin test mods/session-procs
 ```
+
+## Author
+
+Made by **Iftah Saar**. More at **[iftah.dev](https://iftah.dev)**.
