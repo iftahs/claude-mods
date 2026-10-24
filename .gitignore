@@ -9,3 +9,4 @@ CLAUDE.local.md
 *.log
 .DS_Store
 Thumbs.db
+mods/*/tsconfig.json

@@ -37,6 +37,7 @@ const snapshot = atom({ plugin: 'session-procs', key: 'snapshot' } as const, nul
 const history = atom({ plugin: 'session-procs', key: 'history' } as const, [])
 const showHelpers = atom({ plugin: 'session-procs', key: 'showHelpers' } as const, false)
 const error = atom({ plugin: 'session-procs', key: 'error' } as const, null)
+const isPaneOpen = atom({ plugin: 'session-procs', key: 'isPaneOpen' } as const, false)
 
 let isWindows: boolean | undefined
 let isProbing = false
@@ -112,6 +113,26 @@ async function openPane($: EngineInterface) {
   return $.ui.open(isTerminalOnly ? { id: PANE, title: TITLE } : { id: PANE, title: TITLE, columns: SIDEBAR_COLUMNS })
 }
 
+async function syncPaneOpen($: EngineInterface): Promise<void> {
+  const panes = await $.ui.panes()
+  await update($, isPaneOpen, () => panes.some(pane => pane.id === PANE))
+}
+
+async function showPane($: EngineInterface) {
+  const opened = await openPane($)
+  await update($, isPaneOpen, () => true)
+  void refresh($)
+
+  return opened
+}
+
+function bandLabel(snap: Snapshot | null): string {
+  if (snap === null) return 'Looking for processes'
+  const count = toolProcessCount(snap)
+
+  return count > 0 ? `${count} running from tools` : 'Nothing running from tools'
+}
+
 function toggleHelpers($: EngineInterface): Promise<unknown> {
   return update($, showHelpers, shown => !shown)
 }
@@ -141,7 +162,7 @@ export const register: Register = on => {
       name: 'procs',
       description: 'Show the processes this session started (tool shells, dev servers, MCP servers)',
     })
-    void openPane($).catch(() => undefined)
+    void syncPaneOpen($).catch(() => undefined)
     startTicker($)
     void refresh($)
 
@@ -149,11 +170,17 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'procs' }, async $ => {
-    const opened = await openPane($)
-    void refresh($)
+    const opened = await showPane($)
 
     return { text: opened.isPlaced ? 'Session processes pane opened.' : `Session processes pane waits: ${opened.reason}` }
   })
+
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const closed = await next(e)
+    await update($, isPaneOpen, () => false)
+
+    return closed
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
     const ran = await next(e)
@@ -161,6 +188,30 @@ export const register: Register = on => {
 
     return ran
   }).catch(($, e, next) => next(e))
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || (await read($, isPaneOpen))) return next(e)
+
+    const snap = await read($, snapshot)
+    const { Box, Button, Text } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="row" gap={1}>
+        <Text color={snap !== null && toolProcessCount(snap) > 0 ? 'success' : 'subtle'}>●</Text>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end">{bandLabel(snap)}</Text>
+        </Box>
+        {snap !== null && (
+          <Box flexShrink={0}>
+            <Text dimColor>{`· ${formatBytes(totalRss(snap))}`}</Text>
+          </Box>
+        )}
+        <Box flexShrink={0}>
+          <Button key="open-procs" label="Show processes" hotkey="p" onPress={() => showPane($)} />
+        </Box>
+      </Box>
+    )
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const snap = await read($, snapshot)

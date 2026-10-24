@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import type { On } from 'claude-code'
-import type { Engine } from 'claude-code/testing'
+import type { On, RenderElement } from 'claude-code'
+import type { Engine, Plugin } from 'claude-code/testing'
 
 import {
   POSIX_PROBE_ARGV,
@@ -79,6 +79,7 @@ async function mountTerminalPane($: Engine, on: On, ran: PaneRun, env: Record<st
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.surfaces', () => ({ value: ['terminal' as const] }))
   on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.panes', () => ({ value: [] }))
   on('ui.status', () => ({ value: undefined }))
   const logs: string[] = []
   on('ui.log', (_$, e) => {
@@ -239,7 +240,7 @@ describe('pane', () => {
       await ui.unmount()
     }
 
-    expect(opens).toEqual([{ id: 'session-procs', title: 'Session processes', columns: 38 }])
+    expect(opens).toEqual([])
     const sidebar = await $.ui.mount({
       plugin: 'session-procs',
       surface: 'desktop',
@@ -661,5 +662,97 @@ describe('parsing', () => {
     expect(script).toBe(
       'echo $$; PATH=$(command -p getconf PATH 2>/dev/null || echo /usr/bin:/bin); export PATH; exec ps -A -o pid= -o ppid= -o rss= -o etime= -o args=',
     )
+  })
+})
+
+describe('band', () => {
+  const stdout = probeStdout(windowsSession().procs)
+  const closer: Plugin = {
+    name: 'closer',
+    register(on) {
+      on('command.run', { command: 'close-procs' }, async $ => {
+        await $.ui.close({ id: 'session-procs' })
+
+        return { text: 'closed' }
+      })
+    },
+  }
+  const bandProps = {
+    hasSurvey: false,
+    isWorking: false,
+    maxRows: 10,
+    bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 10 },
+    view: {},
+  }
+
+  async function startSession($: Engine, on: On, panes: { id: string; title: string; isShown: boolean; isFocused: boolean; isPlaced: boolean }[] = []) {
+    const clock = mock.clock(on, { now: T0 + 60_000 })
+    mock.env(on, { OS: 'Windows_NT' })
+    on('session.start', (_$, e) => ({ cwd: e.cwd }))
+    on('command.register', (_$, e) => ({ value: { command: e.name } }))
+    on('session.surfaces', () => ({ value: ['desktop' as const] }))
+    const opens: unknown[] = []
+    on('ui.open', (_$, e) => {
+      opens.push(e)
+      return { value: { isPlaced: true as const } }
+    })
+    on('ui.close', () => ({ value: undefined }))
+    on('ui.panes', () => ({ value: panes }))
+    on('ui.status', () => ({ value: undefined }))
+    on('ui.log', () => ({ value: undefined }))
+    on('process.run', () => ({ value: okRun(stdout) }))
+    on('ui.render', ($, e) => h($.ui.resolve(e).Text, null, 'engine') as RenderElement)
+    await $.session.start({ cwd: 'C:\\proj', surface: 'terminal', isInteractive: true })
+    await clock.settle()
+    return { opens }
+  }
+
+  function mountBand($: Engine, surface: 'terminal' | 'desktop', props: Partial<typeof bandProps> = {}) {
+    return $.ui.mount({
+      plugin: 'session-procs',
+      surface,
+      component: 'AbovePrompt',
+      requestId: 'above-prompt',
+      props: { ...bandProps, ...props },
+    })
+  }
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`shows how many processes run and a button to open the pane, on ${surface}`, async ($, on) => {
+      const { opens } = await startSession($, on)
+      const ui = await mountBand($, surface)
+      expect(await ui.find({ type: 'Text', text: /^2 running from tools$/ })).toBeDefined()
+      expect(await ui.find({ type: 'Text', text: /^· 100 MB$/ })).toBeDefined()
+      expect((await ui.find({ type: 'Button', key: 'open-procs' }))?.props.label).toBe('Show processes')
+      expect(opens).toEqual([])
+      await ui.unmount()
+    })
+
+    test(`pressing the button opens the pane once and hides the band until the pane closes, on ${surface}`, { plugins: [closer] }, async ($, on) => {
+      const { opens } = await startSession($, on)
+      const ui = await mountBand($, surface)
+      await ui.press({ key: 'open-procs' })
+      expect(opens).toEqual([{ id: 'session-procs', title: 'Session processes', columns: 38 }])
+      expect(await ui.find({ type: 'Button', key: 'open-procs' })).toBeUndefined()
+
+      await $.command.run({ command: 'close-procs', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+      expect(await ui.find({ type: 'Button', key: 'open-procs' })).toBeDefined()
+      await ui.unmount()
+    })
+
+    test(`a survey holds the band, so it shows no button, on ${surface}`, async ($, on) => {
+      await startSession($, on)
+      const ui = await mountBand($, surface, { hasSurvey: true })
+      expect(await ui.find({ type: 'Button', key: 'open-procs' })).toBeUndefined()
+      await ui.unmount()
+    })
+  }
+
+  test('a pane already open at session start keeps the band away', async ($, on) => {
+    await startSession($, on, [{ id: 'session-procs', title: 'Session processes', isShown: true, isFocused: false, isPlaced: true }])
+    const ui = await mountBand($, 'desktop')
+    expect(await ui.find({ type: 'Button', key: 'open-procs' })).toBeUndefined()
+    await ui.unmount()
   })
 })

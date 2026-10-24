@@ -40,6 +40,7 @@ declare module 'claude-code' {
       snapshot: Snapshot | null
       history: HistoryPoint[]
       showHelpers: boolean
+      isPaneOpen: boolean
       error: string | null
     }
   }
