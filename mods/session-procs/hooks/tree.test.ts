@@ -724,7 +724,7 @@ describe('band', () => {
       const ui = await mountBand($, surface)
       expect(await ui.find({ type: 'Text', text: /^2 running from tools$/ })).toBeDefined()
       expect(await ui.find({ type: 'Text', text: /^· 100 MB$/ })).toBeDefined()
-      expect((await ui.find({ type: 'Button', key: 'open-procs' }))?.props.label).toBe('Show processes')
+      expect((await ui.find({ type: 'Button', key: 'open-procs' }))?.props.label).toBe('Processes')
       expect(opens).toEqual([])
       await ui.unmount()
     })
