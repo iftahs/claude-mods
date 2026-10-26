@@ -28,7 +28,7 @@ On the desktop app the pane docks beside the session sidebar and draws cards tha
 
 ## Use
 
-A one-row band above the prompt shows how many processes run from tools and how much memory they use. Press its **Show processes** button (or `p` while the band has focus, or type `/procs`) to open the pane. Close the pane any time; the band comes back. Collapse the band with its `[-]`. Press `r` to refresh and `h` to show or hide helpers while the pane has focus.
+A one-row band above the prompt shows how many processes run from tools and how much memory they use. Press its **Processes** button (or `p` while the band has focus, or type `/procs`) to open the pane. Close the pane any time; the band comes back. Collapse the band with its `[-]`. Press `r` to refresh and `h` to show or hide helpers while the pane has focus.
 
 ## How it works
 

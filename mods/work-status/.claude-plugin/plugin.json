@@ -1,0 +1,6 @@
+{
+  "name": "work-status",
+  "version": "0.1.0",
+  "description": "A side pane showing what Claude is doing or waiting on, and the plan's tasks with live status and a progress bar.",
+  "types": "./types/index.d.ts"
+}

@@ -193,22 +193,27 @@ export const register: Register = on => {
     if (e.props.hasSurvey || (await read($, isPaneOpen))) return next(e)
 
     const snap = await read($, snapshot)
+    const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
 
+    // The band is one site shared by every mod: sit beside what the mods beneath it drew.
     return (
-      <Box flexDirection="row" gap={1}>
-        <Text color={snap !== null && toolProcessCount(snap) > 0 ? 'success' : 'subtle'}>●</Text>
-        <Box flexShrink={1}>
-          <Text wrap="truncate-end">{bandLabel(snap)}</Text>
-        </Box>
-        {snap !== null && (
-          <Box flexShrink={0}>
-            <Text dimColor>{`· ${formatBytes(totalRss(snap))}`}</Text>
+      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3}>
+        <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+          <Text color={snap !== null && toolProcessCount(snap) > 0 ? 'success' : 'subtle'}>●</Text>
+          <Box flexShrink={1}>
+            <Text wrap="truncate-end">{bandLabel(snap)}</Text>
           </Box>
-        )}
-        <Box flexShrink={0}>
-          <Button key="open-procs" label="Show processes" hotkey="p" onPress={() => showPane($)} />
+          {snap !== null && (
+            <Box flexShrink={0}>
+              <Text dimColor>{`· ${formatBytes(totalRss(snap))}`}</Text>
+            </Box>
+          )}
+          <Box flexShrink={0}>
+            <Button key="open-procs" label="Processes" hotkey="p" onPress={() => showPane($)} />
+          </Box>
         </Box>
+        {below}
       </Box>
     )
   })
