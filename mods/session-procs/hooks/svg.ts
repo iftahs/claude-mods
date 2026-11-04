@@ -15,8 +15,14 @@ const GB = 1024 * 1024 * 1024
 const MAX_SOURCE = 131072
 const MAX_ALT = 600
 const MIN_ROWS = 8
+const LINE_H = 16
+const FIRST_GAP = 17
+const MAX_COMMAND_LINES = 8
+const MAX_ROW_LINES = 2
 
-const DARK = {
+export type CardTheme = 'dark' | 'light'
+
+export const DARK = {
   card: '#15151a',
   border: '#26262f',
   borderStrong: '#3a3a46',
@@ -35,7 +41,7 @@ const DARK = {
   dangerFg: '#ff9090',
 }
 
-const LIGHT: typeof DARK = {
+export const LIGHT: typeof DARK = {
   card: '#ffffff',
   border: '#e4e4e0',
   borderStrong: '#cfcfca',
@@ -76,16 +82,18 @@ function rules(p: typeof DARK): string {
   ].join('')
 }
 
-const STYLE = [
-  rules(DARK),
-  `.sans{font-family:${SANS}}`,
-  `.mono{font-family:${MONO}}`,
-  'text{font-variant-numeric:tabular-nums;white-space:pre}',
-  '.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 2.4s ease-out infinite}',
-  '@keyframes pulse{0%{opacity:.55;transform:scale(1)}100%{opacity:0;transform:scale(2.8)}}',
-  '@media (prefers-reduced-motion: reduce){.pulse{animation:none;opacity:0}}',
-  `@media (prefers-color-scheme: light){${rules(LIGHT)}}`,
-].join('')
+function styleFor(theme: CardTheme | undefined): string {
+  return [
+    rules(theme === 'light' ? LIGHT : DARK),
+    `.sans{font-family:${SANS}}`,
+    `.mono{font-family:${MONO}}`,
+    'text{font-variant-numeric:tabular-nums;white-space:pre}',
+    '.pulse{transform-box:fill-box;transform-origin:center;animation:pulse 2.4s ease-out infinite}',
+    '@keyframes pulse{0%{opacity:.55;transform:scale(1)}100%{opacity:0;transform:scale(2.8)}}',
+    '@media (prefers-reduced-motion: reduce){.pulse{animation:none;opacity:0}}',
+    theme === undefined ? `@media (prefers-color-scheme: light){${rules(LIGHT)}}` : '',
+  ].join('')
+}
 
 export function cardWidth(bodyColumns: number | undefined): number {
   return Math.max(260, Math.min(960, Math.round((bodyColumns ?? 88) * PX_PER_COLUMN)))
@@ -114,6 +122,40 @@ export function fit(value: string, px: number, size: number, isMono = false, em 
   if (flat.length <= max) return flat
   const chars = Array.from(flat)
   return chars.length <= max ? flat : `${chars.slice(0, max - 1).join('')}…`
+}
+
+export function wrapLines(value: string, px: number, size: number, isMono: boolean, maxLines: number, firstPx = px): string[] {
+  const em = isMono ? MONO_EM : SANS_EM
+  const widthOf = (index: number): number => Math.max(1, Math.floor((index === 0 ? firstPx : px) / (size * em)))
+  const lines: string[] = []
+  let line = ''
+  let length = 0
+  for (const word of value.split(/\s+/).filter(Boolean)) {
+    if (lines.length > maxLines) break
+    let chars = Array.from(word)
+    if (length > 0 && length + 1 + chars.length <= widthOf(lines.length)) {
+      line += ` ${word}`
+      length += 1 + chars.length
+      continue
+    }
+    if (length > 0) {
+      lines.push(line)
+      line = ''
+    }
+    while (chars.length > widthOf(lines.length) && lines.length <= maxLines) {
+      const max = widthOf(lines.length)
+      lines.push(chars.slice(0, max).join(''))
+      chars = chars.slice(max)
+    }
+    line = chars.join('')
+    length = chars.length
+  }
+  if (length > 0) lines.push(line)
+  if (maxLines < 1) return []
+  if (lines.length <= maxLines) return lines
+  const kept = lines.slice(0, maxLines)
+  kept[maxLines - 1] = `${Array.from(kept[maxLines - 1] ?? '').slice(0, widthOf(maxLines - 1) - 1).join('')}…`
+  return kept
 }
 
 function num(value: number): string {
@@ -162,8 +204,8 @@ function card(x: number, y: number, width: number, height: number): string {
   return `<rect class="card" x="${num(x + 0.5)}" y="${num(y + 0.5)}" width="${num(width - 1)}" height="${num(height - 1)}" rx="10" stroke-width="1"/>`
 }
 
-function wrap(width: number, height: number, body: string): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><style>${STYLE}</style>${body}</svg>`
+function wrap(width: number, height: number, body: string, theme: CardTheme | undefined): string {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><style>${styleFor(theme)}</style>${body}</svg>`
 }
 
 export function sparkline(x: number, y: number, width: number, height: number, values: readonly number[]): string {
@@ -212,7 +254,7 @@ function tile(t: Tile, x: number, y: number, width: number, m: TileMetrics): str
   return parts.join('')
 }
 
-export function kpiStrip(snap: Snapshot, history: readonly HistoryPoint[], width: number): SvgCard {
+export function kpiStrip(snap: Snapshot, history: readonly HistoryPoint[], width: number, theme?: CardTheme): SvgCard {
   const toolGroups = snap.groups.filter(group => group.kind !== 'helper')
   const detached = snap.groups.filter(group => group.kind === 'detached').length
   const servers = snap.groups.filter(group => group.kind === 'helper').length
@@ -250,7 +292,7 @@ export function kpiStrip(snap: Snapshot, history: readonly HistoryPoint[], width
     .map((one, i) => tile(one, (i % cols) * (tileWidth + gap), Math.floor(i / cols) * (metrics.height + gap), tileWidth, metrics))
     .join('')
   return {
-    source: wrap(width, height, body),
+    source: wrap(width, height, body, theme),
     width,
     height,
     alt: tiles.map(one => `${one.label}: ${one.value}`).join(', '),
@@ -265,6 +307,7 @@ export type GroupsCardOptions = {
   emptyTitle: string
   emptyHint: string
   maxRows?: number
+  theme?: CardTheme
 }
 
 type RowCells = { pid: number; rss: number; startedAt: number | null }
@@ -350,20 +393,28 @@ function renderGroupsCard(o: GroupsCardOptions, maxRows: number): SvgCard {
       parts.push(text(labelX + 8, cy + 4, 'Detached', { cls: 'warning-fg', size: 12, weight: 500 }))
       labelX += 76
     }
-    const isCommand = group.kind !== 'helper'
-    const titleSize = isCommand ? 13 : 14
-    parts.push(
-      text(labelX, cy + 4.5, fit(group.title, labelRight - labelX, titleSize, isCommand), {
-        cls: 'fg',
-        size: titleSize,
-        weight: isCommand ? undefined : 500,
-        isMono: isCommand,
-      }),
-    )
-    parts.push(isCompact ? metaLine(PAD + 18, cy + 22, group) : columns(cy, group, true))
-    y += GROUP_H
+    const headBase = cy + 4.5
+    const lineBase = (index: number) => headBase + FIRST_GAP + index * LINE_H
+    let lastBase = headBase
+    if (group.kind === 'helper') {
+      parts.push(text(labelX, headBase, fit(group.title, labelRight - labelX, 14), { cls: 'fg', size: 14, weight: 500 }))
+    } else if (group.label !== undefined) {
+      parts.push(text(labelX, headBase, fit(group.label, labelRight - labelX, 13), { cls: 'fg', size: 13, weight: 600 }))
+      const lines = wrapLines(group.title, R - labelX, 12, true, MAX_COMMAND_LINES)
+      lines.forEach((line, i) => parts.push(text(labelX, lineBase(i), line, { cls: 'muted', size: 12, isMono: true })))
+      if (lines.length > 0) lastBase = lineBase(lines.length - 1)
+    } else {
+      const lines = wrapLines(group.title, R - labelX, 13, true, MAX_COMMAND_LINES, labelRight - labelX)
+      lines.forEach((line, i) => parts.push(text(labelX, i === 0 ? headBase : lineBase(i - 1), line, { cls: 'fg', size: 13, isMono: true })))
+      if (lines.length > 1) lastBase = lineBase(lines.length - 2)
+    }
+    const metaBase = lastBase + 17.5
+    parts.push(isCompact ? metaLine(PAD + 18, metaBase, group) : columns(cy, group, true))
+    y += Math.max(GROUP_H, Math.ceil(isCompact ? metaBase - y + 10 : lastBase - y + 14))
     drawn += 1
 
+    let anchorY = cy + (isCompact ? 4 : 6)
+    let previous = { depth: Infinity, extra: 0 }
     for (const row of group.rows) {
       if (drawn >= maxRows) {
         hidden += 1
@@ -371,12 +422,16 @@ function renderGroupsCard(o: GroupsCardOptions, maxRows: number): SvgCard {
       }
       const rowCy = isCompact ? y + 12 : y + ROW_H / 2 - 3
       const connX = PAD + 4 + row.depth * (isCompact ? 12 : 16)
-      const reach = isCompact ? ROW_H - 2 : ROW_H - 4
-      parts.push(`<path class="tree" stroke-width="1" d="M${num(connX)} ${num(rowCy - reach)} V${num(rowCy)} H${num(connX + 9)}"/>`)
       const rowLabelX = connX + 15
-      parts.push(text(rowLabelX, rowCy + 4, fit(row.label, labelRight - rowLabelX, 12, true), { cls: 'muted', size: 12, isMono: true }))
-      parts.push(isCompact ? metaLine(rowLabelX, rowCy + 21, row) : columns(rowCy, row, false))
-      y += ROW_H
+      const lines = wrapLines(row.label, R - rowLabelX, 12, true, MAX_ROW_LINES, labelRight - rowLabelX)
+      const extra = Math.max(0, lines.length - 1) * LINE_H
+      const startY = row.depth > previous.depth ? anchorY + previous.extra : anchorY
+      parts.push(`<path class="tree" stroke-width="1" d="M${num(connX)} ${num(startY)} V${num(rowCy)} H${num(connX + 9)}"/>`)
+      lines.forEach((line, i) => parts.push(text(rowLabelX, rowCy + 4 + i * LINE_H, line, { cls: 'muted', size: 12, isMono: true })))
+      parts.push(isCompact ? metaLine(rowLabelX, rowCy + 21 + extra, row) : columns(rowCy, row, false))
+      anchorY = rowCy + (isCompact ? 2 : 4)
+      previous = { depth: row.depth, extra }
+      y += ROW_H + extra
       drawn += 1
     }
     if (group.rows.length > 0) y += isCompact ? 2 : 6
@@ -386,8 +441,12 @@ function renderGroupsCard(o: GroupsCardOptions, maxRows: number): SvgCard {
     y += 30
   }
   const height = Math.ceil(y + 10)
-  const alt = `${o.title}: ${o.groups.length === 0 ? o.emptyTitle : o.groups.map(group => (group.rows.length ? `${group.title} (${group.rows.map(row => row.label).join(', ')})` : group.title)).join('; ')}`
-  return { source: wrap(W, height, card(0, 0, W, height) + parts.join('')), width: W, height, alt: clip(alt, MAX_ALT) }
+  const describe = (group: ProcGroup) => {
+    const head = group.label === undefined ? group.title : `${group.label} - ${group.title}`
+    return group.rows.length ? `${head} (${group.rows.map(row => row.label).join(', ')})` : head
+  }
+  const alt = `${o.title}: ${o.groups.length === 0 ? o.emptyTitle : o.groups.map(describe).join('; ')}`
+  return { source: wrap(W, height, card(0, 0, W, height) + parts.join(''), o.theme), width: W, height, alt: clip(alt, MAX_ALT) }
 }
 
 export function groupsCard(o: GroupsCardOptions): SvgCard {
@@ -400,11 +459,11 @@ export function groupsCard(o: GroupsCardOptions): SvgCard {
   return result
 }
 
-export function callout(kind: 'warning' | 'danger', message: string, width: number): SvgCard {
+export function callout(kind: 'warning' | 'danger', message: string, width: number, theme?: CardTheme): SvgCard {
   const height = 40
   const body =
     `<rect class="${kind}-soft" x="0" y="0" width="${width}" height="${height}" rx="8"/>` +
     dot(18, 20, kind, false) +
     text(32, 24.5, fit(message, width - 48, 13), { cls: `${kind}-fg`, size: 13 })
-  return { source: wrap(width, height, body), width, height, alt: clip(message, MAX_ALT) }
+  return { source: wrap(width, height, body, theme), width, height, alt: clip(message, MAX_ALT) }
 }

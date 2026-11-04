@@ -25,7 +25,7 @@ Ask Claude to start a dev server, a test watcher or a database studio, and they 
   <img alt="session-procs docked in the sidebar, light theme" src="docs/screenshots/sidebar-light.png" width="300">
 </p>
 
-- **Started by tools.** Each command Claude ran, titled with the command itself (`$ npm run dev`), with the processes under it as a tree.
+- **Started by tools.** Each command Claude ran, named in plain words (`Start Expo dev server`) above the full command (`$ npm run dev`), with the processes under it as a tree.
 - **Detached.** Processes that kept running after the shell that started them exited, so orphans don't go unnoticed.
 - **MCP servers and helpers.** The session's MCP servers, one entry per server, behind a toggle.
 - **Stat tiles.** Running processes, helpers, total memory and session uptime, with sparklines.

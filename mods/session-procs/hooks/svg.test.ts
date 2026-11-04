@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { ProcGroup, Snapshot } from '../types'
-import { callout, cardWidth, esc, fit, groupsCard, kpiStrip, sparkline } from './svg'
+import type { CardTheme } from './svg'
+import { DARK, LIGHT, callout, cardWidth, esc, fit, groupsCard, kpiStrip, sparkline, wrapLines } from './svg'
 
 const T0 = 1_792_000_000_000
 const MB = 1024 * 1024
@@ -166,6 +167,160 @@ describe('svg cards', () => {
       const [x, y] = point.split(',').map(Number)
       expect(x! >= 10 && x! <= 110 && y! >= 40 && y! <= 60).toBe(true)
     }
+  })
+
+  describe('long commands', () => {
+    const LONG = '$ cd "/e/dev-projects/Movies App/app" && npx expo start --port 8081 --clear --offline --host lan --scheme movies'
+    const CARD = { title: 'Started by tools', takenAt: T0, emptyTitle: 'x', emptyHint: 'y' }
+    const group = (title: string, extra: Partial<ProcGroup> = {}): ProcGroup => ({
+      id: 'tool-9',
+      kind: 'tool',
+      title,
+      pid: 9,
+      startedAt: T0 - 60_000,
+      rss: 50 * MB,
+      rows: [],
+      ...extra,
+    })
+    const commandLines = (source: string) =>
+      [...source.matchAll(/<text x="[\d.]+" y="[\d.]+" class="mono (?:fg|muted)" font-size="1[23]">([^<]*)<\/text>/g)].map(match =>
+        (match[1] ?? '').replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'),
+      )
+    const words = (lines: string[]) => lines.join(' ').split(' ').filter(Boolean)
+
+    test('wrapLines breaks at spaces, hard-breaks long tokens and ends in … only when text is left', () => {
+      expect(wrapLines('aaa bbb ccc', 60, 12, true, 5)).toEqual(['aaa bbb', 'ccc'])
+      expect(wrapLines('aaa  bbb\n ccc', 1000, 12, true, 5)).toEqual(['aaa bbb ccc'])
+      expect(wrapLines('a'.repeat(20), 60, 12, true, 5)).toEqual(['a'.repeat(8), 'a'.repeat(8), 'aaaa'])
+      expect(wrapLines('xx ' + 'a'.repeat(10), 60, 12, true, 5)).toEqual(['xx', 'a'.repeat(8), 'aa'])
+      expect(wrapLines('aaa bbb ccc ddd eee', 60, 12, true, 2)).toEqual(['aaa bbb', 'ccc ddd…'])
+      expect(wrapLines('aaa bbb ccc ddd', 60, 12, true, 2)).toEqual(['aaa bbb', 'ccc ddd'])
+      expect(wrapLines('a'.repeat(30), 60, 12, true, 2)).toEqual(['a'.repeat(8), 'a'.repeat(7) + '…'])
+      expect(wrapLines('a'.repeat(40), 60, 12, true, 3)).toEqual(['a'.repeat(8), 'a'.repeat(8), 'a'.repeat(7) + '…'])
+      expect(wrapLines('', 60, 12, true, 3)).toEqual([])
+      expect(wrapLines('aaa bbb', 60, 12, true, 0)).toEqual([])
+    })
+
+    test('wrapLines gives the first line its own width and never splits a code point', () => {
+      expect(wrapLines('aaa bbb ccc ddd', 60, 12, true, 5, 36)).toEqual(['aaa', 'bbb ccc', 'ddd'])
+      const emoji = '\u{1F600}'.repeat(20)
+      const lines = wrapLines(emoji, 60, 12, true, 4)
+      expect(lines.map(line => Array.from(line).length)).toEqual([8, 8, 4])
+      expect(lines.join('')).toBe(emoji)
+      expect(wrapLines(emoji, 60, 12, true, 2).at(-1)).toBe(`${'\u{1F600}'.repeat(7)}…`)
+    })
+
+    test('a long command takes more lines and keeps every word of it', () => {
+      for (const width of [720, 277]) {
+        const short = groupsCard({ ...CARD, groups: [group('$ npm run dev')], width })
+        const long = groupsCard({ ...CARD, groups: [group(LONG)], width })
+        expect(long.height).toBeGreaterThan(short.height)
+        expect(words(commandLines(long.source))).toEqual(LONG.split(' '))
+        expect(long.alt).toContain(LONG)
+        expect(isBalanced(long.source)).toBe(true)
+      }
+    })
+
+    test('a label takes the first line and the command wraps in mono below it', () => {
+      const one = groupsCard({ ...CARD, groups: [group(LONG, { label: 'Start Expo dev server · Movies App/app' })], width: 720 })
+      expect(one.source).toContain('font-weight="600">Start Expo dev server · Movies App/app</text>')
+      expect(commandLines(one.source).length).toBeGreaterThan(1)
+      expect(one.source).toMatch(/class="mono muted" font-size="12">\$ cd/)
+      expect(words(commandLines(one.source))).toEqual(LONG.split(' '))
+      expect(one.alt).toBe(`Started by tools: Start Expo dev server · Movies App/app - ${LONG}`)
+      const plain = groupsCard({ ...CARD, groups: [group(LONG)], width: 720 })
+      expect(plain.source).not.toContain('>Start Expo')
+      expect(plain.source).toMatch(/class="mono fg" font-size="13">\$ cd/)
+    })
+
+    test('the label sits on the same line as the columns, and the dot stays level with it', () => {
+      const one = groupsCard({ ...CARD, groups: [group(LONG, { label: 'Start Expo dev server' })], width: 720 })
+      const labelY = /<text x="[\d.]+" y="([\d.]+)"[^>]*font-weight="600">Start Expo/.exec(one.source)?.[1]
+      const dotY = /<circle class="success pulse" cx="[\d.]+" cy="([\d.]+)"/.exec(one.source)?.[1]
+      const memY = /<text x="[\d.]+" y="([\d.]+)"[^>]*text-anchor="end"[^>]*>50 MB<\/text>/.exec(one.source)?.[1]
+      expect(Number(labelY) - Number(dotY)).toBe(4.5)
+      expect(memY).toBe(String(Number(labelY) - 0.5))
+    })
+
+    test('the command is capped at eight lines and ends in …', () => {
+      const huge = '$ ' + Array.from({ length: 60 }, (_, i) => `--option-${i}=value`).join(' ')
+      const one = groupsCard({ ...CARD, groups: [group(huge.slice(0, 300))], width: 277 })
+      const lines = commandLines(one.source)
+      expect(lines.length).toBe(8)
+      expect(lines.at(-1)?.endsWith('…')).toBe(true)
+    })
+
+    test('wrapped lines stay inside the card at every width', () => {
+      for (const width of [277, 400, 720]) {
+        const one = groupsCard({ ...CARD, groups: [group(LONG, { label: 'Start Expo dev server' }), group(LONG, { id: 'detached-4', kind: 'detached' })], width })
+        for (const match of one.source.matchAll(/<text x="([\d.]+)"[^>]*font-size="(\d+)"[^>]*>([^<]*)<\/text>/g)) {
+          if (match[0].includes('text-anchor')) continue
+          const shown = (match[3] ?? '').replace(/&(lt|gt|amp|quot);/g, '_')
+          const em = match[0].includes('class="mono') ? 0.6 : 0.56
+          expect(Number(match[1]) + shown.length * Number(match[2]) * em <= width).toBe(true)
+        }
+      }
+    })
+
+    test('a child process row wraps to two lines, and the tree line keeps up', () => {
+      const long = 'node ' + 'x'.repeat(90)
+      const row = (depth: number, label = long) => ({ pid: 7, depth, label, rss: MB, startedAt: T0 })
+      const card = (rows: ReturnType<typeof row>[]) => groupsCard({ ...CARD, groups: [group('$ npm run dev', { rows })], width: 720 })
+      const paths = (source: string) =>
+        [...source.matchAll(/<path class="tree" stroke-width="1" d="M[\d.]+ ([\d.]+) V([\d.]+) H/g)].map(match => ({ from: Number(match[1]), to: Number(match[2]) }))
+      const short = card([row(0, 'node server.js')])
+      const wrapped = card([row(0)])
+      expect(wrapped.height).toBe(short.height + 16)
+      expect(commandLines(wrapped.source).slice(1)).toEqual(['node', 'x'.repeat(90)])
+      const child = card([row(0), row(1)])
+      const sibling = card([row(0), row(0)])
+      expect(child.height).toBe(short.height + 30 + 32)
+      const [first, second] = paths(child.source)
+      expect(second!.from - first!.to).toBe(4 + 16)
+      const [, next] = paths(sibling.source)
+      expect(next!.from - paths(sibling.source)[0]!.to).toBe(4)
+      const clipped = card([row(0, 'node ' + 'x'.repeat(400))])
+      expect(commandLines(clipped.source).slice(1).length).toBe(2)
+      expect(commandLines(clipped.source).at(-1)?.endsWith('…')).toBe(true)
+      expect(isBalanced(child.source)).toBe(true)
+    })
+  })
+
+  describe('theme', () => {
+    const cards = (theme?: CardTheme) => [
+      kpiStrip(snap, [], 720, theme).source,
+      groupsCard({ title: 'Started by tools', groups: tools, width: 720, takenAt: T0, emptyTitle: 'x', emptyHint: 'y', theme }).source,
+      callout('warning', 'Heads up', 400, theme).source,
+    ]
+
+    test('dark draws the dark palette only', () => {
+      for (const source of cards('dark')) {
+        expect(source).toContain(`.card{fill:${DARK.card}`)
+        expect(source).not.toContain(LIGHT.card)
+        expect(source).not.toContain('prefers-color-scheme')
+        expect(source).toContain('@keyframes pulse')
+        expect(source).toContain('prefers-reduced-motion')
+        expect(isBalanced(source)).toBe(true)
+      }
+    })
+
+    test('light draws the light palette only', () => {
+      for (const source of cards('light')) {
+        expect(source).toContain(`.card{fill:${LIGHT.card}`)
+        expect(source).not.toContain(DARK.card)
+        expect(source).not.toContain('prefers-color-scheme')
+        expect(source).toContain('@keyframes pulse')
+        expect(source).toContain('prefers-reduced-motion')
+        expect(isBalanced(source)).toBe(true)
+      }
+    })
+
+    test('no theme keeps the dark palette with the system color scheme on top', () => {
+      for (const source of cards()) {
+        expect(source).toContain(`.card{fill:${DARK.card}`)
+        expect(source).toContain(`@media (prefers-color-scheme: light){.card{fill:${LIGHT.card}`)
+      }
+    })
   })
 
   test('helpers', () => {

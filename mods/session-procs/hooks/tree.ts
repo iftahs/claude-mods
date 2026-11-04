@@ -1,4 +1,4 @@
-import type { ProcGroup, ProcGroupKind, ProcRow, Snapshot } from '../types'
+import type { LabelRecord, ProcGroup, ProcGroupKind, ProcRow, Snapshot } from '../types'
 
 export type RawProc = {
   pid: number
@@ -72,6 +72,10 @@ export function windowsProbeArgv(systemRoot: string): string[] {
 
 const MAX_TEXT = 2000
 const MAX_LABEL = 300
+const MAX_DESCRIPTION = 80
+const POWERSHELL_TITLE = 'PowerShell tool command'
+const MATCH_SKEW_MS = 2000
+const POWERSHELL_WINDOW_MS = 5000
 const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g
 
 export function clip(text: string, max: number): string {
@@ -84,9 +88,9 @@ export function cleanText(text: string): string {
   return clip(text, MAX_TEXT).replace(/\r/g, ' ').replace(CONTROL_CHARS, '\ufffd')
 }
 
-function safeLabel(text: string): string {
+function safeLabel(text: string, max = MAX_LABEL): string {
   const flat = redactSecrets(text).replace(/\s+/g, ' ').trim()
-  return clip(flat, MAX_LABEL) === flat ? flat : `${clip(flat, MAX_LABEL - 1)}…`
+  return clip(flat, max) === flat ? flat : `${clip(flat, max - 1)}…`
 }
 
 type WindowsRow = {
@@ -182,11 +186,17 @@ export function commandLabel(proc: RawProc): string {
   return [shortExe(exe || proc.name), shortenPaths(redactSecrets(rest))].filter(Boolean).join(' ')
 }
 
+function unquoteWindows(text: string): string {
+  return text.replace(/(\\+)"/g, (whole, slashes: string) =>
+    slashes.length % 2 === 1 ? `${'\\'.repeat((slashes.length - 1) / 2)}"` : whole,
+  )
+}
+
 export function toolShellTitle(proc: RawProc): string {
-  const unescaped = proc.cmd.replace(/\\"/g, '"')
+  const unescaped = unquoteWindows(proc.cmd)
   const evaluated = /eval '((?:[^']|'"'"'|'\\'')*)(?:'|$)/.exec(unescaped)?.[1]
   if (evaluated) return `$ ${redactSecrets(evaluated.replace(/'"'"'|'\\''/g, "'").trim())}`
-  if (proc.cmd.includes('CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT')) return 'PowerShell tool command'
+  if (proc.cmd.includes('CLAUDE_CODE_SHELL_LAUNCHER_SCRIPT')) return POWERSHELL_TITLE
   return `${shortExe(proc.name)} tool command`
 }
 
@@ -414,6 +424,188 @@ export function buildSnapshot(
 
 function toRow(proc: RawProc, depth: number): ProcRow {
   return { pid: proc.pid, depth, label: safeLabel(commandLabel(proc)), rss: proc.rss, startedAt: proc.startedAt }
+}
+
+const CD_PREFIX = /^cd\s+(?:\/d\s+)?("[^"]*"|'[^']*'|[^\s;&|]+)\s*(?:&&|;)\s*/i
+const ENV_ASSIGNMENT = /^[A-Za-z_]\w*=/
+const EXEC_PAIRS = new Set(['pnpm exec', 'pnpm dlx', 'yarn dlx', 'npm exec'])
+const INTERPRETERS = new Set(['node', 'python', 'python3', 'py'])
+const SCRIPT_NAME = /^[\w:.@/-]+$/
+const SCRIPT_SHORTCUTS = new Set(['dev', 'start', 'serve', 'test', 'watch'])
+const NPM_SHORTCUTS = new Set(['start', 'test'])
+
+function programName(token: string): string {
+  return basename(token.replace(/^["']|["']$/g, ''))
+    .toLowerCase()
+    .replace(/\.(exe|cmd|bat|ps1|js|mjs|cjs)$/, '')
+}
+
+function dropFlags(tokens: string[]): string[] {
+  let index = 0
+  while (tokens[index]?.startsWith('-')) index++
+  return tokens.slice(index)
+}
+
+function launchedTokens(command: string): string[] {
+  const chain = command.split(/\s*(?:&&|\|\||;)\s*/).filter(Boolean)
+  let tokens = (chain[chain.length - 1] ?? '').split(/\s*\|\s*/)[0]!.split(' ').filter(Boolean)
+  for (;;) {
+    const first = tokens[0] ?? ''
+    const name = programName(first)
+    if (ENV_ASSIGNMENT.test(first) || name === 'env' || name === 'cross-env') tokens = tokens.slice(1)
+    else if (name === 'npx' || name === 'bunx') tokens = dropFlags(tokens.slice(1))
+    else if (EXEC_PAIRS.has(`${name} ${tokens[1] ?? ''}`)) tokens = dropFlags(tokens.slice(2))
+    else break
+  }
+  if (INTERPRETERS.has(programName(tokens[0] ?? ''))) {
+    const rest = tokens[1] === '-m' ? tokens.slice(2) : tokens.slice(1)
+    if (rest[0] !== undefined && !rest[0].startsWith('-')) tokens = rest
+  }
+  return tokens
+}
+
+function describeScript(runner: string, args: string[]): string | undefined {
+  const first = args[0] ?? ''
+  if (first === 'run' || first === 'run-script') {
+    const script = args.slice(1).find(arg => !arg.startsWith('-'))
+    return script !== undefined && SCRIPT_NAME.test(script) ? `${runner} script: ${script}` : undefined
+  }
+  const isShortcut = runner === 'npm' ? NPM_SHORTCUTS.has(first) : runner !== 'bun' && SCRIPT_SHORTCUTS.has(first)
+  return isShortcut ? `${runner} script: ${first}` : undefined
+}
+
+function describeTokens(tokens: string[]): string | undefined {
+  const name = programName(tokens[0] ?? '')
+  const args = tokens.slice(1)
+  const sub = args[0] ?? ''
+  const has = (word: string): boolean => args.includes(word)
+  switch (name) {
+    case 'expo':
+      return sub === 'start' ? 'Expo dev server' : undefined
+    case 'next':
+      return sub === 'dev' ? 'Next.js dev server' : undefined
+    case 'vite':
+      return sub === '' || sub.startsWith('-') || sub === 'dev' || sub === 'serve' ? 'Vite dev server' : undefined
+    case 'npm':
+    case 'pnpm':
+    case 'yarn':
+    case 'bun':
+      return describeScript(name, args)
+    case 'vitest':
+      return 'Vitest'
+    case 'jest':
+      return 'Jest'
+    case 'tsc':
+      return has('-w') || has('--watch') ? 'TypeScript watch' : undefined
+    case 'prisma':
+      return sub === 'studio' ? 'Prisma Studio' : undefined
+    case 'storybook':
+    case 'start-storybook':
+      return 'Storybook'
+    case 'webpack':
+      return sub === 'serve' ? 'webpack dev server' : undefined
+    case 'webpack-dev-server':
+      return 'webpack dev server'
+    case 'astro':
+      return sub === 'dev' ? 'Astro dev server' : undefined
+    case 'nodemon':
+      return 'nodemon'
+    case 'http.server':
+      return 'Python HTTP server'
+    case 'uvicorn':
+      return 'Uvicorn server'
+    case 'flask':
+      return has('run') ? 'Flask server' : undefined
+    case 'manage.py':
+      return sub === 'runserver' ? 'Django server' : undefined
+    case 'docker':
+      return sub === 'compose' && has('up') ? 'Docker Compose' : undefined
+    case 'docker-compose':
+      return has('up') ? 'Docker Compose' : undefined
+    case 'firebase':
+      return has('emulators:start') ? 'Firebase emulators' : undefined
+    case 'ngrok':
+      return 'Tunnel'
+    case 'cloudflared':
+      return has('tunnel') ? 'Tunnel' : undefined
+    case 'adb':
+      return has('logcat') ? 'Android logcat' : undefined
+    case 'gradlew':
+    case 'gradle':
+      return 'Gradle'
+    case 'tail':
+      return args.some(arg => /^-[a-z]*f|^--follow/i.test(arg)) ? 'Log tail' : undefined
+    default:
+      return undefined
+  }
+}
+
+function splitCd(command: string): { dir: string; rest: string } {
+  const flat = command.replace(/\s+/g, ' ').trim()
+  const match = CD_PREFIX.exec(flat)
+  return match ? { dir: (match[1] ?? '').replace(/^(["'])(.*)\1$/, '$2'), rest: flat.slice(match[0].length) } : { dir: '', rest: flat }
+}
+
+function withContext(label: string, dir: string): string {
+  const context = dir
+    .split(/[\\/]+/)
+    .filter(part => part !== '' && part !== '.' && part !== '..' && part !== '~' && !/^[A-Za-z]:$/.test(part))
+    .slice(-2)
+    .join('/')
+  return context === '' ? label : `${label} · ${context}`
+}
+
+export function describeCommand(command: string): string | undefined {
+  const { dir, rest } = splitCd(command)
+  const what = describeTokens(launchedTokens(rest))
+  return what === undefined ? undefined : withContext(what, dir)
+}
+
+export function labelRecord(tool: LabelRecord['tool'], command: unknown, description: unknown, at: number): LabelRecord | undefined {
+  if (typeof command !== 'string' || typeof description !== 'string') return undefined
+  const label = safeLabel(cleanText(description), MAX_DESCRIPTION)
+  const flat = clip(redactSecrets(cleanText(command)).replace(/\s+/g, ' ').trim(), MAX_LABEL)
+  return label === '' || flat === '' ? undefined : { tool, command: flat, label, at }
+}
+
+const matchKey = (text: string): string => text.replace(/\\+"/g, '"')
+
+function isSameCommand(title: string, command: string): boolean {
+  if (!title.startsWith('$ ')) return false
+  const shown = matchKey(title.slice(2))
+  const stored = matchKey(command)
+  if (shown === stored) return true
+  return shown.endsWith('…') && Array.from(title).length === MAX_LABEL && stored.startsWith(shown.slice(0, -1))
+}
+
+function findRecord(group: ProcGroup, records: readonly LabelRecord[]): LabelRecord | undefined {
+  const start = group.startedAt
+  const isPowerShell = group.title === POWERSHELL_TITLE
+  let best: LabelRecord | undefined
+  for (const record of records) {
+    if (isPowerShell) {
+      if (record.tool !== 'PowerShell' || start === null || start - record.at > POWERSHELL_WINDOW_MS) continue
+    } else if (record.tool !== 'Bash' || !isSameCommand(group.title, record.command)) continue
+    if (start !== null && record.at > start + MATCH_SKEW_MS) continue
+    if (best === undefined || record.at >= best.at) best = record
+  }
+  return best
+}
+
+function labelGroup(group: ProcGroup, records: readonly LabelRecord[]): ProcGroup {
+  if (group.kind === 'helper') return group
+  const record = group.kind === 'tool' ? findRecord(group, records) : undefined
+  if (record) {
+    const label = withContext(record.label, splitCd(record.command).dir)
+    return record.tool === 'PowerShell' ? { ...group, label, title: `PS> ${record.command}` } : { ...group, label }
+  }
+  const command = group.kind === 'tool' ? (group.title.startsWith('$ ') ? group.title.slice(2) : '') : group.title
+  const label = command === '' ? undefined : describeCommand(command)
+  return label === undefined ? group : { ...group, label }
+}
+
+export function withLabels(snapshot: Snapshot, records: readonly LabelRecord[]): Snapshot {
+  return { ...snapshot, groups: snapshot.groups.map(group => labelGroup(group, records)) }
 }
 
 export function toolProcessCount(snapshot: Snapshot): number {
