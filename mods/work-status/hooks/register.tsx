@@ -1,11 +1,13 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ActivityKind, Task, TaskStatus, Wait } from '../types'
+import type { ActivityKind, Task, TaskStatus, ToolError, Wait } from '../types'
 import { COLOR, HOURGLASS, progressBar, pulse, taskIcon } from './icons'
 import {
+  FILES_COLLAPSED,
   FILE_TOOLS,
   MAX_ERRORS,
+  MAX_EVENTS,
   MAX_FILES_SHOWN,
   PLAN_STATUS,
   SPINNER,
@@ -13,9 +15,11 @@ import {
   addFile,
   ago,
   applyPlan,
+  cleanError,
   createTask,
   describeTool,
   duration,
+  errorTitle,
   filePath,
   fromTodos,
   isFreshPlan,
@@ -23,11 +27,10 @@ import {
   markTask,
   planSummary,
   pushEvent,
-  splitPath,
+  splitFiles,
   subagentOf,
   taskTime,
   textBar,
-  truncate,
   updateTask,
   wrapUp,
 } from './plan'
@@ -58,6 +61,9 @@ const contextPercent = atom({ plugin: 'work-status', key: 'contextPercent' } as 
 const agents = atom({ plugin: 'work-status', key: 'agents' } as const, [])
 const errors = atom({ plugin: 'work-status', key: 'errors' } as const, [])
 const decision = atom({ plugin: 'work-status', key: 'decision' } as const, null)
+const showErrors = atom({ plugin: 'work-status', key: 'showErrors' } as const, false)
+const showAllFiles = atom({ plugin: 'work-status', key: 'showAllFiles' } as const, false)
+const cwd = atom({ plugin: 'work-status', key: 'cwd' } as const, null)
 
 const GUIDE = `The work-status mod shows the person, in a side pane, what you are doing or waiting on and how your task list is going.
 - Whenever the work is blocked on something outside this turn (CI or e2e tests, someone's code review, a build, a deploy, a reply), call ${SET_WAITING} with the full list of what you are waiting on, each a short phrase such as "e2e tests on the PR" or "Code review from <reviewer>". Call it with an empty list as soon as nothing is pending.
@@ -171,9 +177,16 @@ async function recordOutcome($: EngineInterface, tool: string, args: Args, ran: 
   if (ran.deny !== undefined) return
 
   if (ran.isError) {
-    const at = await $.clock.now()
-    const text = truncate(ran.text || `${tool} failed`, 120)
-    await update($, errors, list => [...list, { tool: tool.split('__').pop() || tool, text, at }].slice(-MAX_ERRORS))
+    const at = await touch($)
+    const { code, text } = cleanError(ran.text ?? '')
+    const error: ToolError = {
+      tool: tool.split('__').pop() || tool,
+      title: errorTitle(tool, args),
+      ...(code !== undefined && { code }),
+      text,
+      at,
+    }
+    await update($, errors, list => [...list, error].slice(-MAX_ERRORS))
     return
   }
 
@@ -237,6 +250,7 @@ export const register: Register = on => {
       },
       isDeferred: false,
     })
+    await update($, cwd, () => e.cwd)
     void syncPaneOpen($).catch(() => undefined)
 
     return next(e)
@@ -248,6 +262,8 @@ export const register: Register = on => {
       await update($, background, () => [])
       await update($, tasks, () => [])
       await update($, events, () => [])
+      await update($, showErrors, () => false)
+      await update($, showAllFiles, () => false)
       await resetRun($)
       await syncTicker($)
 
@@ -279,24 +295,26 @@ export const register: Register = on => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const chip = [plan && `Plan ${plan}`, pending > 0 && `${pending} pending`, elapsed].filter(Boolean).join(' · ')
 
-    // The band is one site shared by every mod: sit beside what the mods beneath it drew.
+    // The band is one site shared by every mod: draw our own row, then what the mods beneath drew.
     return (
-      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3}>
-        <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
-          <Text color={COLOR[now?.kind ?? 'input']}>●</Text>
-          <Box flexShrink={1}>
-            <Text wrap="truncate-end">{now?.text ?? 'Idle'}</Text>
+      <Box flexDirection="column" rowGap="xs">
+        <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2}>
+          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+            <Text color={COLOR[now?.kind ?? 'input']}>●</Text>
+            <Box flexShrink={1}>
+              <Text wrap="truncate-end">{now?.text ?? 'Idle'}</Text>
+            </Box>
+            {chip !== '' && (
+              <Box flexShrink={0}>
+                <Text dimColor>{chip}</Text>
+              </Box>
+            )}
+            {errorCount > 0 && (
+              <Box flexShrink={0}>
+                <Text color={COLOR.failed}>{`· ${errorCount} error${errorCount === 1 ? '' : 's'}`}</Text>
+              </Box>
+            )}
           </Box>
-          {chip !== '' && (
-            <Box flexShrink={0}>
-              <Text dimColor>{chip}</Text>
-            </Box>
-          )}
-          {errorCount > 0 && (
-            <Box flexShrink={0}>
-              <Text color={COLOR.failed}>{`· ${errorCount} error${errorCount === 1 ? '' : 's'}`}</Text>
-            </Box>
-          )}
           <Box flexShrink={0}>
             <Button key="open-work-status" label="Status" hotkey="w" onPress={() => openPane($)} />
           </Box>
@@ -434,6 +452,7 @@ export const register: Register = on => {
     }
 
     const at = await touch($)
+    const startedAt = await read($, turnStartedAt)
     await update($, agents, () => [])
     await update($, turnStartedAt, () => null)
     const pending = [...(await read($, waits)), ...(await read($, background))]
@@ -448,7 +467,7 @@ export const register: Register = on => {
     } else if (pending.length > 0) {
       await setActivity($, 'waiting', `Waiting on ${pending.length} thing${pending.length === 1 ? '' : 's'}`)
     } else {
-      await setActivity($, 'input', 'Waiting for your input')
+      await setActivity($, 'done', startedAt === null ? 'Done' : `Done in ${duration(at - startedAt)}`)
     }
 
     const label = e.reason === 'aborted' ? 'Turn stopped' : e.reason === 'answer' ? 'Turn done' : 'Turn failed'
@@ -472,6 +491,9 @@ export const register: Register = on => {
     const touched = await read($, files)
     const recent = await read($, events)
     const failures = await read($, errors)
+    const isShowingErrors = await read($, showErrors)
+    const isShowingAllFiles = await read($, showAllFiles)
+    const root = await read($, cwd)
     const done = list.filter(task => task.status === 'done').length
     const failed = list.filter(task => task.status === 'failed').length
     const isRunning = list.some(task => task.status === 'in_progress')
@@ -485,16 +507,33 @@ export const register: Register = on => {
     const status = [startedAt === null ? undefined : `Working ${duration(clock - startedAt)}`, context === null ? undefined : `context ${context}%`]
       .filter(Boolean)
       .join(' · ')
-    const fileRows = touched.slice(0, MAX_FILES_SHOWN).map(splitPath)
-    const moreFiles = touched.length - fileRows.length
+    const { rows: listed, scratch } = splitFiles(touched, root)
+    const fileRows = listed.slice(0, isShowingAllFiles ? MAX_FILES_SHOWN : FILES_COLLAPSED)
+    const moreFiles = isShowingAllFiles ? listed.length - fileRows.length : 0
+    const filesLabel = isShowingAllFiles ? 'Show less' : `Show all (${listed.length})`
+    const scratchLabel = `+${scratch} scratch file${scratch === 1 ? '' : 's'}`
     const agentRows = subagents.map(agent => ({
       title: agent.description,
       meta: [agent.type, duration(clock - agent.startedAt)].filter(Boolean).join(' · '),
     }))
-    const eventRows = recent.map(event => ({ ago: ago(clock - event.at), text: event.text }))
+    const errorRows = [...failures].reverse().map(error => {
+      const title = error.title ?? error.tool
+
+      return {
+        title,
+        meta: [title === error.tool ? undefined : error.tool, error.code !== undefined && `exit ${error.code}`, ago(clock - error.at)]
+          .filter(Boolean)
+          .join(' · '),
+        text: error.text,
+      }
+    })
+    const eventRows = recent.slice(-MAX_EVENTS).map(event => ({ ago: ago(clock - event.at), text: event.text }))
+    const toggleErrors = () => void update($, showErrors, isOn => !isOn)
+    const clearErrors = () => void update($, errors, () => [])
+    const toggleFiles = () => void update($, showAllFiles, isOn => !isOn)
 
     if (e.surface === 'terminal') {
-      const { Box, Text } = $.ui.resolve(e)
+      const { Box, Button, Text } = $.ui.resolve(e)
       const spin = SPINNER[await read($, frame)] ?? SPINNER[0]
 
       return (
@@ -507,20 +546,9 @@ export const register: Register = on => {
           </Box>
           {pending.length > 0 && (
             <Box flexDirection="column">
-              <Text dimColor>Waiting on</Text>
+              <Text dimColor>WAITING ON</Text>
               {pending.map(wait => (
                 <Text color={COLOR.waiting}>⧗ {wait.text}</Text>
-              ))}
-            </Box>
-          )}
-          {agentRows.length > 0 && (
-            <Box flexDirection="column">
-              <Text dimColor>Subagents · {agentRows.length}</Text>
-              {agentRows.map(row => (
-                <Box flexDirection="row" gap={1}>
-                  <Text color={COLOR.working}>◆ {row.title}</Text>
-                  <Text dimColor>{row.meta}</Text>
-                </Box>
               ))}
             </Box>
           )}
@@ -528,7 +556,7 @@ export const register: Register = on => {
             <Text dimColor>No plan yet.</Text>
           ) : (
             <Box flexDirection="column">
-              <Text dimColor>Plan · {summary}</Text>
+              <Text dimColor>PLAN · {summary}</Text>
               <Text color={ratio === 1 ? COLOR.done : COLOR.in_progress}>{textBar(e.props.bodyColumns, ratio)}</Text>
               {list.map(task => (
                 <Box flexDirection="column">
@@ -543,31 +571,70 @@ export const register: Register = on => {
               ))}
             </Box>
           )}
+          {agentRows.length > 0 && (
+            <Box flexDirection="column">
+              <Text dimColor>SUBAGENTS · {agentRows.length}</Text>
+              {agentRows.map(row => (
+                <Box flexDirection="row" gap={1}>
+                  <Text color={COLOR.working}>◆ {row.title}</Text>
+                  <Text dimColor>{row.meta}</Text>
+                </Box>
+              ))}
+            </Box>
+          )}
           {failures.length > 0 && (
             <Box flexDirection="column">
-              <Text color={COLOR.failed}>Errors · {failures.length}</Text>
-              {failures.map(error => (
-                <Text color={COLOR.failed}>
-                  ✖ {error.tool}: {error.text}
-                </Text>
-              ))}
+              <Box flexDirection="row" gap={1}>
+                <Text color={COLOR.failed}>ERRORS · {failures.length}</Text>
+                <Button key="toggle-errors" label={isShowingErrors ? 'Hide' : 'Show'} hotkey="e" onPress={toggleErrors} />
+                <Button key="clear-errors" label="Clear" hotkey="x" onPress={clearErrors} />
+              </Box>
+              {isShowingErrors &&
+                errorRows.map(row => (
+                  <Box flexDirection="column">
+                    <Box flexDirection="row" gap={1}>
+                      <Text color={COLOR.failed}>✖</Text>
+                      <Box flexShrink={1}>
+                        <Text wrap="truncate-end">{row.title}</Text>
+                      </Box>
+                    </Box>
+                    <Box flexDirection="column" paddingLeft={2}>
+                      <Text dimColor>{row.meta}</Text>
+                      {row.text !== '' && (
+                        <Text dimColor wrap="truncate-end">
+                          {row.text}
+                        </Text>
+                      )}
+                    </Box>
+                  </Box>
+                ))}
             </Box>
           )}
           {touched.length > 0 && (
             <Box flexDirection="column">
-              <Text dimColor>Files touched · {touched.length}</Text>
+              <Box flexDirection="row" gap={1}>
+                <Text dimColor>FILES · {touched.length}</Text>
+                {listed.length > FILES_COLLAPSED && <Button key="toggle-files" label={filesLabel} hotkey="f" onPress={toggleFiles} />}
+              </Box>
               {fileRows.map(row => (
                 <Box flexDirection="row" gap={1}>
                   <Text>{row.name}</Text>
-                  <Text dimColor>{row.dir}</Text>
+                  {row.dir !== '' && (
+                    <Box flexShrink={1}>
+                      <Text dimColor wrap="truncate-start">
+                        {row.dir}
+                      </Text>
+                    </Box>
+                  )}
                 </Box>
               ))}
               {moreFiles > 0 && <Text dimColor>+{moreFiles} more</Text>}
+              {scratch > 0 && <Text dimColor>{scratchLabel}</Text>}
             </Box>
           )}
           {eventRows.length > 0 && (
             <Box flexDirection="column">
-              <Text dimColor>Timeline</Text>
+              <Text dimColor>TIMELINE</Text>
               {eventRows.map(row => (
                 <Box flexDirection="row" gap={1}>
                   <Text dimColor>{row.ago}</Text>
@@ -580,14 +647,14 @@ export const register: Register = on => {
       )
     }
 
-    const { Box, Text, Svg } = $.ui.resolve(e)
+    const { Box, Button, Text, Svg } = $.ui.resolve(e)
     const barWidth = Math.max(120, Math.min(560, e.props.bodyColumns * 7))
 
     return (
       <Box flexDirection="column" gap={2}>
         <Box flexDirection="column" gap={1}>
           <Box flexDirection="row" alignItems="center" gap={1}>
-            <Svg source={pulse(kind)} alt={kind} width={18} height={18} isInteractive />
+            <Svg source={pulse(kind)} alt={kind} width={18} height={18} isInteractive={kind !== 'done'} />
             <Text weight="semibold">{headline}</Text>
           </Box>
           {status !== '' && (
@@ -605,22 +672,6 @@ export const register: Register = on => {
               <Box flexDirection="row" alignItems="center" gap={1}>
                 <Svg source={HOURGLASS} alt="waiting" width={14} height={14} isInteractive />
                 <Text>{wait.text}</Text>
-              </Box>
-            ))}
-          </Box>
-        )}
-        {agentRows.length > 0 && (
-          <Box flexDirection="column" gap={1}>
-            <Text size="caption" dimColor>
-              SUBAGENTS · {agentRows.length}
-            </Text>
-            {agentRows.map(row => (
-              <Box flexDirection="row" alignItems="center" gap={1}>
-                <Svg source={taskIcon('in_progress')} alt="running" width={16} height={16} isInteractive />
-                <Text>{row.title}</Text>
-                <Text size="caption" dimColor>
-                  {row.meta}
-                </Text>
               </Box>
             ))}
           </Box>
@@ -673,34 +724,91 @@ export const register: Register = on => {
             ))}
           </Box>
         )}
+        {agentRows.length > 0 && (
+          <Box flexDirection="column" gap={1}>
+            <Text size="caption" dimColor>
+              SUBAGENTS · {agentRows.length}
+            </Text>
+            {agentRows.map(row => (
+              <Box flexDirection="row" alignItems="center" gap={1}>
+                <Svg source={taskIcon('in_progress')} alt="running" width={16} height={16} isInteractive />
+                <Text>{row.title}</Text>
+                <Text size="caption" dimColor>
+                  {row.meta}
+                </Text>
+              </Box>
+            ))}
+          </Box>
+        )}
         {failures.length > 0 && (
           <Box flexDirection="column" gap={1}>
-            <Text size="caption" color={COLOR.failed}>
-              ERRORS · {failures.length}
-            </Text>
-            {failures.map(error => (
-              <Text color={COLOR.failed}>
-                {error.tool}: {error.text}
+            <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2}>
+              <Text size="caption" color={COLOR.failed}>
+                ERRORS · {failures.length}
               </Text>
-            ))}
+              <Box flexDirection="row" gap={1}>
+                <Button key="toggle-errors" label={isShowingErrors ? 'Hide' : 'Show'} hotkey="e" onPress={toggleErrors} />
+                <Button key="clear-errors" label="Clear" hotkey="x" onPress={clearErrors} />
+              </Box>
+            </Box>
+            {isShowingErrors && (
+              <Box flexDirection="column" gap={1}>
+                {errorRows.map(row => (
+                  <Box flexDirection="column">
+                    <Box flexDirection="row" alignItems="center" gap={1}>
+                      <Box flexShrink={0}>
+                        <Svg source={taskIcon('failed')} alt="failed" width={14} height={14} />
+                      </Box>
+                      <Box flexShrink={1}>
+                        <Text wrap="truncate-end">{row.title}</Text>
+                      </Box>
+                    </Box>
+                    <Box flexDirection="column" paddingLeft={3}>
+                      <Text size="caption" dimColor>
+                        {row.meta}
+                      </Text>
+                      {row.text !== '' && (
+                        <Text size="caption" dimColor mono wrap="truncate-end">
+                          {row.text}
+                        </Text>
+                      )}
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+            )}
           </Box>
         )}
         {touched.length > 0 && (
           <Box flexDirection="column" gap={1}>
-            <Text size="caption" dimColor>
-              FILES TOUCHED · {touched.length}
-            </Text>
-            {fileRows.map(row => (
-              <Box flexDirection="row" gap={1}>
-                <Text>{row.name}</Text>
-                <Text size="caption" dimColor>
-                  {row.dir}
-                </Text>
-              </Box>
-            ))}
+            <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2}>
+              <Text size="caption" dimColor>
+                FILES · {touched.length}
+              </Text>
+              {listed.length > FILES_COLLAPSED && <Button key="toggle-files" label={filesLabel} hotkey="f" onPress={toggleFiles} />}
+            </Box>
+            <Box flexDirection="column">
+              {fileRows.map(row => (
+                <Box flexDirection="row" gap={1}>
+                  <Text>{row.name}</Text>
+                  {row.dir !== '' && (
+                    <Box flexShrink={1}>
+                      <Text size="caption" dimColor wrap="truncate-start">
+                        {row.dir}
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
+              ))}
+            </Box>
             {moreFiles > 0 && (
               <Text size="caption" dimColor>
                 +{moreFiles} more
+              </Text>
+            )}
+            {scratch > 0 && (
+              <Text size="caption" dimColor>
+                {scratchLabel}
               </Text>
             )}
           </Box>
@@ -710,14 +818,16 @@ export const register: Register = on => {
             <Text size="caption" dimColor>
               TIMELINE
             </Text>
-            {eventRows.map(row => (
-              <Box flexDirection="row" gap={1}>
-                <Text size="caption" dimColor>
-                  {row.ago}
-                </Text>
-                <Text>{row.text}</Text>
-              </Box>
-            ))}
+            <Box flexDirection="column">
+              {eventRows.map(row => (
+                <Box flexDirection="row" gap={1}>
+                  <Text size="caption" dimColor>
+                    {row.ago}
+                  </Text>
+                  <Text>{row.text}</Text>
+                </Box>
+              ))}
+            </Box>
           </Box>
         )}
       </Box>

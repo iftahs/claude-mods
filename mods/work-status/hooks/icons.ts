@@ -45,6 +45,8 @@ export function taskIcon(status: TaskStatus): string {
 export function pulse(kind: ActivityKind): string {
   const color = COLOR[kind]
 
+  if (kind === 'done') return svg(18, `<circle cx="8" cy="8" r="4" fill="${color}"/>`)
+
   return svg(
     18,
     `<circle cx="8" cy="8" r="4" fill="${color}" fill-opacity=".35">` +
