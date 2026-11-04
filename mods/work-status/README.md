@@ -2,14 +2,14 @@
 
 A side pane, "Work status", that shows:
 
-- **What Claude is doing or waiting on**: working, running a command, waiting for subagents, waiting for your answer or input, stopped, plus outside waits Claude reports (e2e tests, a code review, a deploy) and background tasks.
+- **What Claude is doing or waiting on**: working, running a command, waiting for subagents, waiting for your answer, stopped, or done ("Done in 3m 12s", in green), plus outside waits Claude reports (e2e tests, a code review, a deploy) and background tasks.
 - **The plan**: every task with its status (waiting, in progress, done, failed), animated icons, a progress bar with the percentage done, and how long each task took (live for the one in progress).
 - **The current step**: under the task in progress, what Claude is doing right now (for example "Running: npm test").
 - **The turn**: how long it has been working and how full the context window is ("Working 3m 12s · context 34%").
 - **Subagents**: each running subagent with its description, type and elapsed time.
-- **Files touched**: the files Claude, or a subagent, edited or wrote in this plan (first 15, then "+n more").
-- **Errors**: tool calls that failed, in red.
-- **Timeline**: the last ten tool calls with how long ago they ran.
+- **Errors**: tool calls that failed, collapsed to a count until you press Show. Each one names what failed, the exit code and a one-line cleaned detail.
+- **Files**: the files Claude, or a subagent, edited or wrote in this plan, relative to the project (the first 8, or up to 40 with Show all). Scratch and temp files are folded into a "+n scratch files" line.
+- **Timeline**: the last six tool calls with how long ago they ran.
 
 It works in the Claude Code desktop app (animated SVG icons) and the terminal (text spinner and block bar).
 
@@ -51,13 +51,16 @@ claude --plugin-dir ~/mods/work-status
 
 ## Use
 
-- A one-row band above the prompt shows what Claude is doing, the plan's progress and how many things are pending, with a "Status" button (hotkey w) that opens the pane. The band hides while the pane is open.
-- The pane also opens by itself when Claude starts a plan.
+- A band above the prompt shows what Claude is doing, the plan's progress and how many things are pending. It is a row of its own, with the "Status" button (hotkey w) at the right end, so it never overlaps what other mods draw beneath it. The band hides while the pane is open.
 - `/work-status` reopens the pane.
 - The band also shows the elapsed turn time while Claude works, and a red "n errors" when tool calls failed.
-- A desktop notification and toast ("Work status") fire when every task of the plan is done, or when a turn ends on an error. Waiting for your input does not notify.
+- When a turn ends, the band and the pane say how it ended: "Done in 3m 12s" when there is nothing left to ask or wait for, "Waiting for your decision: …" when Claude's closing message asks you something, "Waiting on n things" when outside waits or background tasks are pending, and "Stopped. Waiting for you" or "Stopped on an error" when it was interrupted or failed.
+- In the desktop app, Claude's closing wrap-up checks off every step still waiting or in progress, so a finished plan reads 100%. A step marked failed stays failed.
+- In the pane, "ERRORS · n" stays collapsed; "Show" (hotkey e) lists them newest first, "Clear" (hotkey x) empties the list.
+- Files under the project show their folder relative to it. "Show all (n)" (hotkey f) lists up to 40 instead of 8.
+- A desktop notification and toast ("Work status") fire when every task of the plan is done, or when a turn ends on an error. A finished turn or a wait on you does not notify.
 - A new plan (a fresh task list) clears the files and errors lists.
-- `/work-status clear` resets the waiting list, the plan, files, errors and the timeline.
+- `/work-status clear` resets the waiting list, the plan, files, errors and the timeline, and collapses the errors and files lists again.
 - Claude reports outside waits and failed tasks itself: the mod adds a short instruction to its system prompt and two tools (`set_waiting`, `mark_task`).
 
 ## Troubleshooting

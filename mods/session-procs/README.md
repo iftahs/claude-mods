@@ -17,18 +17,18 @@ The screenshots use demo data. The wider layout, with PID and memory-meter colum
 
 ## What it shows
 
-- **Started by tools**: each Bash or PowerShell command Claude ran, titled with the command itself (`$ npm run dev`), and the processes under it (`node …/bin/next dev`) with PID, memory and age.
-- **Detached**: processes that kept running after the shell that started them exited.
+- **Started by tools**: each Bash or PowerShell command Claude ran, with a plain-words label (`Start Expo dev server · My App/app`) above the full command (`$ cd "…/app" && npx expo start`), wrapped over up to eight lines instead of cut short, and the processes under it (`node …/bin/next dev`) with PID, memory and age. The label is the description Claude gave the tool call. When there is none, the mod names well-known dev tools from the command (Expo, Next.js, Vite, `npm run <script>`, Vitest, Docker Compose and more) and shows no label for anything else.
+- **Detached**: processes that kept running after the shell that started them exited, labelled the same way when the command is a known dev tool.
 - **MCP servers & helpers**: the session's MCP servers and other helpers, behind a toggle.
 - **Stat tiles** for running processes, helpers, total memory and session uptime, with sparklines.
-- **Band above the prompt**: one row with the number of processes running from tools and their total memory, and a button that opens the pane. It steps aside while the pane is open.
+- **Band above the prompt**: a row of its own with the number of processes running from tools and their total memory on the left and the **Processes** button at the right end. Anything other mods draw in the band sits on rows beneath it. It steps aside while the pane is open.
 - **Status line**: `procs: N running from tools` under the prompt while something is running.
 
-On the desktop app the pane docks beside the session sidebar and draws cards that follow your light or dark theme. In a terminal it draws a themed text view.
+On the desktop app the pane docks beside the session sidebar and draws cards that follow the theme setting of the Claude desktop app (dark or light), read from the app's `config.json`; when the app is set to match the system, and in VS Code and on mobile, the cards follow the system color scheme. In a terminal it draws a themed text view.
 
 ## Use
 
-A one-row band above the prompt shows how many processes run from tools and how much memory they use. Press its **Processes** button (or `p` while the band has focus, or type `/procs`) to open the pane. Close the pane any time; the band comes back. Collapse the band with its `[-]`. Press `r` to refresh and `h` to show or hide helpers while the pane has focus.
+A band above the prompt shows how many processes run from tools and how much memory they use, with a **Processes** button at its right end. Press the button (or `p` while the band has focus, or type `/procs`) to open the pane. Close the pane any time; the band comes back. Collapse the band with its `[-]`. Press `r` to refresh and `h` to show or hide helpers while the pane has focus.
 
 ## How it works
 
@@ -37,12 +37,16 @@ The mod asks the operating system for the process list, finds its own Claude Cod
 - **Windows**: `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -Command`, started in `%SystemRoot%\System32`, running a fixed, readable `Get-CimInstance Win32_Process` query.
 - **macOS and Linux**: `/bin/sh -c 'echo $$; PATH=$(command -p getconf PATH 2>/dev/null || echo /usr/bin:/bin); export PATH; exec ps -A -o pid= -o ppid= -o rss= -o etime= -o args='`.
 
-It refreshes every 5 seconds while the pane is visible, every 30 seconds otherwise, and shortly after each Bash or PowerShell tool call. On Windows each refresh takes about a second of PowerShell start-up.
+To say what each process is, the mod notes the description and command of every Bash and PowerShell tool call just before it runs, and matches a process group to its note by command (exactly, or by prefix when the title was cut at 300 characters). A PowerShell tool shell doesn't show its command in the process list, so it takes the newest PowerShell note from the five seconds before the process started, and the title becomes `PS> <command>`.
+
+It refreshes every 5 seconds while the pane is visible, every 30 seconds otherwise, and shortly after each Bash or PowerShell tool call. On Windows each refresh takes about a second of PowerShell start-up. The app's theme setting is read when the session starts and again at most every 30 seconds, so a theme switch shows in the open pane within about half a minute.
 
 ## Privacy and safety
 
 - Runs entirely on your machine. No network calls, no telemetry.
+- To pick the card colors, it reads one value, `userThemeMode`, from the Claude desktop app's `config.json` (`%APPDATA%\Claude\config.json` on Windows, `~/Library/Application Support/Claude/config.json` on macOS, `$XDG_CONFIG_HOME/Claude/config.json` or `~/.config/Claude/config.json` on Linux). It keeps `dark` or `light` and nothing else from that file: the rest is never stored, logged or drawn. A missing or unreadable file, or any other value, leaves the cards on the system color scheme.
 - The process list is never sent to the model or over the network, and it is never added to the conversation. It does live in a few places you should know about: the session's plugin state holds the latest snapshot (other plugins installed in the same session can read it), the session's process ancestry (process names and PIDs, no command lines) and any error messages, redacted, are written to Claude Code's debug log, and on remote surfaces such as mobile, Claude Code carries the drawn pane to that device.
+- To label processes, the mod keeps the description and the command of the last 50 Bash and PowerShell tool calls (the main agent's and subagents') in the session's plugin state, so other plugins in the same session can read them. Both go through the masking below before they are stored; the command is collapsed to one line and capped at 300 characters and the description at 80. They are not sent anywhere or added to the conversation.
 - Command lines often carry secrets. Before a snapshot is stored or drawn, the mod masks the following. Masking is best effort; treat the pane like any terminal that shows command lines.
   - Values of flags and variables named like tokens, secrets, passwords, API or access keys, account keys, credentials and `auth` in any case style (`--token=...`, `--api-key ...`, `--secretKey ...`, `PASSWORD=...`, `AccountKey=...`), including values left in an unclosed quote. Flags that name where a secret lives (ending in `stdin`, `file`, `path`, `prompt` or `env`, such as `--password-file` or `--tokenPath`) are left alone.
   - Connection-string and query-string parameters (`Password=...;`, `?token=...&`).
@@ -57,6 +61,7 @@ It refreshes every 5 seconds while the pane is visible, every 30 seconds otherwi
 
 ## Limits
 
+- Labels are best effort: two identical commands started within a couple of seconds can swap labels, and a PowerShell call that waited more than five seconds for approval is shown without one.
 - A process started with `cmd &` inside a shell that exits before the next refresh can't be traced back to the session, so it won't show.
 - The macOS and Linux probe is covered by tests but has had less real-world use than the Windows one.
 - Tested on Claude Code 2.1.295. The function-hooks API is in early access.

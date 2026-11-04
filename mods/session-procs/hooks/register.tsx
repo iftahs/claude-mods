@@ -11,6 +11,7 @@ import {
   formatAge,
   formatBytes,
   helperProcessCount,
+  labelRecord,
   parsePosixProbe,
   parseWindowsProbe,
   redactSecrets,
@@ -18,6 +19,7 @@ import {
   toolProcessCount,
   totalRss,
   windowsProbeArgv,
+  withLabels,
 } from './tree'
 import type { Probe } from './tree'
 
@@ -25,8 +27,10 @@ const PANE = 'session-procs'
 const TITLE = 'Session processes'
 const TICK_MS = 5000
 const IDLE_PROBE_MS = 30000
+const THEME_READ_MS = 30000
 const AFTER_TOOL_MS = 1500
 const HISTORY_SIZE = 40
+const LABEL_KEEP = 50
 const SHELL_TOOLS = new Set(['Bash', 'PowerShell'])
 const SIDEBAR_COLUMNS = 38
 const SPARK = '▁▂▃▄▅▆▇█'
@@ -35,22 +39,65 @@ const MAX_ERROR = 300
 
 const snapshot = atom({ plugin: 'session-procs', key: 'snapshot' } as const, null)
 const history = atom({ plugin: 'session-procs', key: 'history' } as const, [])
+const labels = atom({ plugin: 'session-procs', key: 'labels' } as const, [])
 const showHelpers = atom({ plugin: 'session-procs', key: 'showHelpers' } as const, false)
 const error = atom({ plugin: 'session-procs', key: 'error' } as const, null)
 const isPaneOpen = atom({ plugin: 'session-procs', key: 'isPaneOpen' } as const, false)
+const theme = atom({ plugin: 'session-procs', key: 'theme' } as const, null)
 
 let isWindows: boolean | undefined
 let isProbing = false
 let lastProbeAt = 0
+let lastThemeAt = 0
 let hasLoggedRoot = false
 let known = new Map<number, number | null>()
 let pending: Timer | undefined
 let ticker: Timer | undefined
 
-async function probe($: EngineInterface, now: number): Promise<Probe> {
+async function onWindows($: EngineInterface): Promise<boolean> {
   isWindows ??= (await $.env.get('OS')) === 'Windows_NT'
-  const systemRoot = safeSystemRoot(isWindows ? await $.env.get('SystemRoot') : undefined)
-  const ran = isWindows
+
+  return isWindows
+}
+
+async function themeConfigPaths($: EngineInterface): Promise<string[]> {
+  if (await onWindows($)) {
+    const appData = await $.env.get('APPDATA')
+
+    return appData ? [`${appData}\\Claude\\config.json`] : []
+  }
+  const home = await $.env.get('HOME')
+  if (!home) return []
+  const configHome = (await $.env.get('XDG_CONFIG_HOME')) || `${home}/.config`
+
+  return [`${home}/Library/Application Support/Claude/config.json`, `${configHome}/Claude/config.json`]
+}
+
+async function readTheme($: EngineInterface): Promise<'dark' | 'light' | null> {
+  for (const path of await themeConfigPaths($)) {
+    try {
+      const mode = (JSON.parse(await $.fs.read(path)) as { userThemeMode?: unknown } | null)?.userThemeMode
+
+      return mode === 'dark' || mode === 'light' ? mode : null
+    } catch {
+      continue
+    }
+  }
+
+  return null
+}
+
+async function refreshTheme($: EngineInterface, now: number): Promise<void> {
+  if (now - lastThemeAt < THEME_READ_MS) return
+  lastThemeAt = now
+  const mode = await readTheme($)
+  await update($, theme, () => mode)
+}
+
+async function probe($: EngineInterface, now: number): Promise<Probe> {
+  const windows = await onWindows($)
+  const systemRoot = safeSystemRoot(windows ? await $.env.get('SystemRoot') : undefined)
+  const ran = windows
     ? await $.process.run(windowsProbeArgv(systemRoot), { timeoutMs: 20000, cwd: `${systemRoot}\\System32` })
     : await $.process.run([...POSIX_PROBE_ARGV], { timeoutMs: 20000 })
   if (ran.exitCode !== 0) {
@@ -59,7 +106,7 @@ async function probe($: EngineInterface, now: number): Promise<Probe> {
   }
   if (ran.isStdoutTruncated) throw new Error('The process list was too large to read.')
   try {
-    return isWindows ? parseWindowsProbe(ran.stdout) : parsePosixProbe(ran.stdout, now)
+    return windows ? parseWindowsProbe(ran.stdout) : parsePosixProbe(ran.stdout, now)
   } catch {
     throw new Error('Could not read the process list.')
   }
@@ -71,14 +118,16 @@ async function refresh($: EngineInterface): Promise<void> {
   try {
     const startedAt = await $.clock.now()
     lastProbeAt = startedAt
+    await refreshTheme($, startedAt)
     const built = buildSnapshot(await probe($, startedAt), startedAt, known)
+    const shown = withLabels(built.snapshot, await read($, labels))
     known = built.known
     if (!hasLoggedRoot) {
       hasLoggedRoot = true
       $.ui.log(`session-procs: root ${built.snapshot.rootLabel}; chain ${built.snapshot.chain}`, { to: 'debug' })
     }
     const point: HistoryPoint = { at: startedAt, tools: toolProcessCount(built.snapshot), rss: totalRss(built.snapshot) }
-    await update($, snapshot, () => built.snapshot)
+    await update($, snapshot, () => shown)
     await update($, history, points => [...(points ?? []), point].slice(-HISTORY_SIZE))
     await update($, error, () => null)
     $.ui.status(point.tools > 0 ? `procs: ${point.tools} running from tools` : undefined)
@@ -162,6 +211,7 @@ export const register: Register = on => {
       name: 'procs',
       description: 'Show the processes this session started (tool shells, dev servers, MCP servers)',
     })
+    lastThemeAt = 0
     void syncPaneOpen($).catch(() => undefined)
     startTicker($)
     void refresh($)
@@ -183,6 +233,10 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
+    if (e.tool === 'Bash' || e.tool === 'PowerShell') {
+      const record = labelRecord(e.tool, e.command, e.description, await $.clock.now())
+      if (record) await update($, labels, list => [...(list ?? []), record].slice(-LABEL_KEEP))
+    }
     const ran = await next(e)
     if (SHELL_TOOLS.has(String(e.tool))) refreshSoon($)
 
@@ -196,19 +250,21 @@ export const register: Register = on => {
     const below = await next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
 
-    // The band is one site shared by every mod: sit beside what the mods beneath it drew.
+    // The band is one site shared by every mod: draw our own row, then what the mods beneath drew.
     return (
-      <Box flexDirection="row" flexWrap="wrap" alignItems="center" columnGap={3}>
-        <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
-          <Text color={snap !== null && toolProcessCount(snap) > 0 ? 'success' : 'subtle'}>●</Text>
-          <Box flexShrink={1}>
-            <Text wrap="truncate-end">{bandLabel(snap)}</Text>
-          </Box>
-          {snap !== null && (
-            <Box flexShrink={0}>
-              <Text dimColor>{`· ${formatBytes(totalRss(snap))}`}</Text>
+      <Box flexDirection="column" rowGap="xs">
+        <Box flexDirection="row" alignItems="center" justifyContent="space-between" columnGap={2}>
+          <Box flexDirection="row" alignItems="center" gap={1} flexShrink={1}>
+            <Text color={snap !== null && toolProcessCount(snap) > 0 ? 'success' : 'subtle'}>●</Text>
+            <Box flexShrink={1}>
+              <Text wrap="truncate-end">{bandLabel(snap)}</Text>
             </Box>
-          )}
+            {snap !== null && (
+              <Box flexShrink={0}>
+                <Text dimColor>{`· ${formatBytes(totalRss(snap))}`}</Text>
+              </Box>
+            )}
+          </Box>
           <Box flexShrink={0}>
             <Button key="open-procs" label="Processes" hotkey="p" onPress={() => showPane($)} />
           </Box>
@@ -263,7 +319,11 @@ export const register: Register = on => {
               <Text color={group.kind === 'detached' ? 'warning' : 'success'}>●</Text>
               {group.kind === 'detached' && <Text color="warning">detached</Text>}
               <Box flexGrow={1} flexShrink={1}>
-                <Text bold wrap="truncate-end">{group.title}</Text>
+                {group.label === undefined ? (
+                  <Text bold wrap="wrap">{group.title}</Text>
+                ) : (
+                  <Text bold wrap="truncate-end">{group.label}</Text>
+                )}
               </Box>
               <Box flexShrink={0} gap={1}>
                 <Text color="subtle">{String(group.pid).padStart(7)}</Text>
@@ -272,6 +332,11 @@ export const register: Register = on => {
                 <Text color="subtle">{age(group.startedAt).padStart(7)}</Text>
               </Box>
             </Box>
+            {group.label !== undefined && (
+              <Box paddingLeft={2}>
+                <Text color="subtle" wrap="wrap">{group.title}</Text>
+              </Box>
+            )}
             {group.rows.map(row => (
               <Box flexDirection="row" gap={1} paddingLeft={2 + row.depth * 2}>
                 <Text color="subtle">└</Text>
@@ -340,13 +405,15 @@ export const register: Register = on => {
 
     const { Box, Button, Svg, Text } = $.ui.resolve(e)
     const width = cardWidth(e.props.bodyColumns)
+    const cardTheme = e.surface === 'desktop' ? ((await read($, theme)) ?? undefined) : undefined
     const cards = snap
       ? [
-          kpiStrip(snap, points, width),
+          kpiStrip(snap, points, width, cardTheme),
           groupsCard({
             title: 'Started by tools',
             groups: toolGroups,
             width,
+            theme: cardTheme,
             takenAt: snap.takenAt,
             emptyTitle: 'Nothing running from tools',
             emptyHint: 'Start a dev server with Bash and it shows up here.',
@@ -357,6 +424,7 @@ export const register: Register = on => {
                   title: 'MCP servers & helpers',
                   groups: helperGroups,
                   width,
+                  theme: cardTheme,
                   takenAt: snap.takenAt,
                   emptyTitle: 'No MCP servers or helpers',
                   emptyHint: 'Servers this session starts show up here.',
@@ -387,7 +455,7 @@ export const register: Register = on => {
             <Button key="refresh" label="Refresh" hotkey="r" onPress={() => void refresh($)} />
           </Box>
         </Box>
-        {notice !== null && <Svg {...svgProps(callout(failure !== null ? 'danger' : 'warning', notice, width))} />}
+        {notice !== null && <Svg {...svgProps(callout(failure !== null ? 'danger' : 'warning', notice, width, cardTheme))} />}
         {snap === null && failure === null && <Text dimColor>Looking for this session's processes</Text>}
         {cards.map(one => (
           <Svg {...svgProps(one)} />

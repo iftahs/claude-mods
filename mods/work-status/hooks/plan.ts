@@ -14,9 +14,11 @@ export const TERMINAL_ICON: Record<TaskStatus, string> = { waiting: '○', in_pr
 export const FILE_TOOLS = ['Edit', 'Write', 'NotebookEdit']
 const PLAN_TOOLS = ['TodoWrite', 'TaskCreate', 'TaskUpdate', 'mcp__ccd_turn__update_plan', 'mcp__ccd_turn__wrap_up']
 
-export const MAX_EVENTS = 10
+export const MAX_EVENTS = 6
 export const MAX_ERRORS = 20
-export const MAX_FILES_SHOWN = 15
+export const MAX_FILES_SHOWN = 40
+export const FILES_COLLAPSED = 8
+const MAX_ERROR_TEXT = 160
 
 const isClosed = (task: Task) => task.status === 'done' || task.status === 'failed'
 
@@ -86,7 +88,7 @@ export function fromTodos(list: Task[], args: Args, now: number): Task[] {
 }
 
 export function wrapUp(list: Task[], now: number): Task[] {
-  return stamp(list, list.map(task => (task.status === 'in_progress' ? { ...task, status: 'done' as const } : task)), now)
+  return stamp(list, list.map(task => (isClosed(task) ? task : { ...task, status: 'done' as const })), now)
 }
 
 export function markTask(list: Task[], step: number, status: TaskStatus, now: number): Task[] {
@@ -176,6 +178,40 @@ export function splitPath(path: string): { name: string; dir: string } {
   return { name, dir: parts.length > 3 ? `…/${tail}` : tail }
 }
 
+const slashed = (path: string) => path.replace(/\\/g, '/')
+
+export const isScratch = (path: string) => /\/(?:tmp|scratchpad|appdata\/local\/temp)\//i.test(slashed(path))
+
+// The directory of `path` below `cwd`, or undefined when the file lies outside it.
+export function relativeDir(cwd: string, path: string): string | undefined {
+  const root = slashed(cwd).replace(/\/+$/, '')
+  const full = slashed(path)
+  const isWindows = /^[a-z]:/i.test(root)
+  const [a, b] = isWindows ? [root.toLowerCase(), full.toLowerCase()] : [root, full]
+
+  if (!b.startsWith(`${a}/`)) return undefined
+
+  return full.slice(root.length + 1).split('/').slice(0, -1).join('/')
+}
+
+export type FileRow = { name: string; dir: string }
+
+// Files under the project show their project-relative folder; scratch files elsewhere are only counted.
+export function splitFiles(paths: string[], cwd: string | null): { rows: FileRow[]; scratch: number } {
+  const rows: FileRow[] = []
+  let scratch = 0
+
+  for (const path of paths) {
+    const dir = cwd === null ? undefined : relativeDir(cwd, path)
+
+    if (dir !== undefined) rows.push({ name: splitPath(path).name, dir })
+    else if (isScratch(path)) scratch += 1
+    else rows.push(splitPath(path))
+  }
+
+  return { rows, scratch }
+}
+
 export function filePath(args: Args): string | undefined {
   const path = args.file_path ?? args.notebook_path
 
@@ -188,6 +224,38 @@ export function addFile(files: string[], path: string): string[] {
 
 export function pushEvent(events: TimelineEvent[], at: number, text: string): TimelineEvent[] {
   return [...events, { at, text }].slice(-MAX_EVENTS)
+}
+
+// Cuts a tool failure down to its exit code and first meaningful line, without mojibake or control characters.
+export function cleanError(raw: string): { code?: number; text: string } {
+  const exit = /^\s*Exit code (\d+)/.exec(raw)
+  const lines = (exit ? raw.slice(exit[0].length) : raw)
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/�+/g, ' ')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .split(/\r?\n/)
+  const line = lines.find(text => /[\p{L}\p{N}]/u.test(text)) ?? ''
+
+  return { ...(exit && { code: Number(exit[1]) }), text: truncate(line, MAX_ERROR_TEXT) }
+}
+
+// What failed, from the call's own arguments.
+export function errorTitle(tool: string, args: Args): string {
+  const short = tool.split('__').pop() || tool
+  const path = filePath(args)
+
+  if (tool.startsWith('mcp__')) return short
+
+  if (tool === 'Bash' || tool === 'PowerShell') {
+    const described = typeof args.description === 'string' ? args.description : ''
+
+    return truncate(described || String(args.command ?? ''), 80) || tool
+  }
+
+  if (path !== undefined) return splitPath(path).name
+  if (typeof args.pattern === 'string' && args.pattern !== '') return truncate(args.pattern, 80)
+
+  return short
 }
 
 export function describeTool(tool: string, args: Args): string | undefined {

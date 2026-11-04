@@ -3,6 +3,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On, RenderElement } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 
+import type { Task } from '../types'
+import { cleanError, errorTitle, isScratch, relativeDir, splitFiles, wrapUp } from '../hooks/plan'
+
 const PANE = {
   plugin: 'work-status',
   component: 'Pane',
@@ -75,6 +78,11 @@ const turnEnd = (reason: 'answer' | 'error') =>
   ({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason }) as const
 
 const text = (re: RegExp) => ({ type: 'Text', text: re }) as const
+
+const WRAP_UP = 'mcp__ccd_turn__wrap_up'
+
+// The host-generated tool types do not list these MCP tool names.
+const callMcp = ($: Engine, tool: string, args: object = {}) => $.tool.call({ tool, ...args } as never)
 
 const edit = (file_path: string, agentId?: string) => ({ tool: 'Edit' as const, file_path, old_string: 'a', new_string: 'b', ...(agentId && { agentId }) })
 const write = (file_path: string, agentId?: string) => ({ tool: 'Write' as const, file_path, content: '', ...(agentId && { agentId }) })
@@ -169,7 +177,7 @@ for (const surface of SURFACES) {
     await $.tool.call({ tool: 'Read', file_path: '/src/never.ts' })
 
     const ui = await mountPane($, surface)
-    expect(await ui.find(text(/files touched · 3/i))).toBeDefined()
+    expect(await ui.find(text(/^files · 3$/i))).toBeDefined()
     expect(await ui.find(text(/^a\.ts$/))).toBeDefined()
     expect(await ui.find(text(/^b\.ts$/))).toBeDefined()
     expect(await ui.find(text(/^c\.ipynb$/))).toBeDefined()
@@ -177,17 +185,54 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`a long file list is cut with a count, and /work-status clear empties it, on ${surface}`, async ($, on) => {
+  test(`a long file list shows eight until Show all, and /work-status clear empties and collapses it, on ${surface}`, async ($, on) => {
     boot(on)
     await $.session.start({ cwd: '/', surface, isInteractive: true })
-    for (let i = 1; i <= 17; i += 1) await $.tool.call(write(`/src/f${i}.ts`))
+    for (let i = 1; i <= 45; i += 1) await $.tool.call(write(`/src/f${i}.ts`))
 
     const ui = await mountPane($, surface)
-    expect(await ui.find(text(/files touched · 17/i))).toBeDefined()
-    expect(await ui.find(text(/^\+2 more$/))).toBeDefined()
+    const toggle = async () => (await ui.find({ type: 'Button', key: 'toggle-files' }))?.props.label
+    expect(await ui.find(text(/^files · 45$/i))).toBeDefined()
+    expect(await ui.find(text(/^f8\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^f9\.ts$/))).toBeUndefined()
+    expect(await toggle()).toBe('Show all (45)')
+
+    await ui.press({ key: 'toggle-files' })
+    expect(await toggle()).toBe('Show less')
+    expect(await ui.find(text(/^f40\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^f41\.ts$/))).toBeUndefined()
+    expect(await ui.find(text(/^\+5 more$/))).toBeDefined()
 
     await $.command.run({ command: 'work-status', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
-    expect(await ui.find(text(/files touched/i))).toBeUndefined()
+    expect(await ui.find(text(/files/i))).toBeUndefined()
+
+    for (let i = 1; i <= 9; i += 1) await $.tool.call(write(`/src/g${i}.ts`))
+    expect(await ui.find(text(/^g8\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^g9\.ts$/))).toBeUndefined()
+    expect(await toggle()).toBe('Show all (9)')
+    await ui.unmount()
+  })
+
+  test(`files under the project show their folder relative to it, scratch files are only counted, on ${surface}`, async ($, on) => {
+    boot(on)
+    await $.session.start({ cwd: 'E:\\dev\\app', surface, isInteractive: true })
+    await $.tool.call(edit('E:\\dev\\app\\src\\domain\\user.ts'))
+    await $.tool.call(write('e:/dev/app/readme.md'))
+    await $.tool.call(write('E:\\dev\\application\\other.ts'))
+    await $.tool.call(write('C:\\Users\\me\\AppData\\Local\\Temp\\claude\\proj\\scratchpad\\frames.py'))
+    await $.tool.call(write('/tmp/one.ts'))
+
+    const ui = await mountPane($, surface)
+    expect(await ui.find(text(/^files · 5$/i))).toBeDefined()
+    expect(await ui.find(text(/^user\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^src\/domain$/))).toBeDefined()
+    expect(await ui.find(text(/^readme\.md$/))).toBeDefined()
+    expect(await ui.find(text(/^other\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^E:\/dev\/application$/))).toBeDefined()
+    expect(await ui.find(text(/^frames\.py$/))).toBeUndefined()
+    expect(await ui.find(text(/^one\.ts$/))).toBeUndefined()
+    expect(await ui.find(text(/^\+2 scratch files$/))).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'toggle-files' })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -201,10 +246,11 @@ for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect(await ui.find(text(/^old\.ts$/))).toBeUndefined()
     expect(await ui.find(text(/old failure/))).toBeUndefined()
+    expect(await ui.find(text(/errors/i))).toBeUndefined()
     await ui.unmount()
   })
 
-  test(`failed tool calls of any agent are listed, and the band counts them, on ${surface}`, async ($, on) => {
+  test(`failed tool calls of any agent are listed behind Show, and the band counts them, on ${surface}`, async ($, on) => {
     boot(on, {
       hasEngineRow: true,
       toolCall: e => (e.tool === 'Bash' ? { result: {}, isError: true, text: `npm ERR! ${e.agentId ?? 'main'}` } : { result: {} }),
@@ -216,12 +262,75 @@ for (const surface of SURFACES) {
 
     const ui = await mountPane($, surface)
     expect(await ui.find(text(/errors · 3/i))).toBeDefined()
+    expect(await ui.find(text(/npm ERR! sub-1/))).toBeUndefined()
+    await ui.press({ key: 'toggle-errors' })
     expect(await ui.find(text(/npm ERR! sub-1/))).toBeDefined()
     await ui.unmount()
 
     const band = await $.ui.mount({ ...BAND, surface })
     expect(await band.find(text(/^· 3 errors$/))).toBeDefined()
     await band.unmount()
+  })
+
+  test(`an error shows what failed, its exit code and a cleaned first line, newest first, and Clear empties the list, on ${surface}`, async ($, on) => {
+    const failing: Record<string, string> = {
+      Bash: 'Exit code 2\n\uFFFD\uFFFD\uFFFD /usr/bin/bash: -c:  line 169: unexpected EOF while looking for matching\nsecond line',
+      Edit: 'String to replace not found',
+    }
+    boot(on, { toolCall: e => (e.tool in failing ? { result: {}, isError: true, text: failing[e.tool] } : { result: {} }) })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.tool.call({ tool: 'Bash', command: 'bash build.sh', description: 'Run the build' })
+    await $.tool.call(edit('/src/app/a.ts'))
+
+    const ui = await mountPane($, surface)
+    const label = async () => (await ui.find({ type: 'Button', key: 'toggle-errors' }))?.props.label
+    expect(await label()).toBe('Show')
+    expect(await ui.find(text(/^Run the build$/))).toBeUndefined()
+
+    await ui.press({ key: 'toggle-errors' })
+    expect(await label()).toBe('Hide')
+    const titles = await ui.findAll(text(/^(Run the build|a\.ts)$/))
+    expect(titles.map(row => row.text)).toEqual(['a.ts', 'Run the build'])
+    expect(await ui.find(text(/^Bash · exit 2 · now$/))).toBeDefined()
+    expect(await ui.find(text(/^Edit · now$/))).toBeDefined()
+    expect(await ui.find(text(/^String to replace not found$/))).toBeDefined()
+    expect(await ui.find(text(/^\/usr\/bin\/bash: -c: line 169: unexpected EOF while looking for matching$/))).toBeDefined()
+    expect(await ui.find(text(/second line|Exit code|\uFFFD/))).toBeUndefined()
+
+    await ui.press({ key: 'clear-errors' })
+    expect(await ui.find(text(/errors/i))).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`/work-status clear collapses the errors again, on ${surface}`, async ($, on) => {
+    boot(on, { toolCall: e => (e.tool === 'Bash' ? { result: {}, isError: true, text: 'Exit code 1\nboom' } : { result: {} }) })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.tool.call({ tool: 'Bash', command: 'false' })
+
+    const ui = await mountPane($, surface)
+    await ui.press({ key: 'toggle-errors' })
+    expect(await ui.find(text(/^boom$/))).toBeDefined()
+
+    await $.command.run({ command: 'work-status', args: 'clear', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 120 } })
+    await $.tool.call({ tool: 'Bash', command: 'false' })
+    expect((await ui.find({ type: 'Button', key: 'toggle-errors' }))?.props.label).toBe('Show')
+    expect(await ui.find(text(/^boom$/))).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test(`an error stored before titles and exit codes existed still renders, on ${surface}`, async ($, on) => {
+    boot(on)
+    on('state.get', { plugin: 'work-status', key: 'errors' }, () => ({
+      value: { value: [{ tool: 'Bash', text: 'old failure', at: T0 }], version: 1 },
+    }))
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+
+    const ui = await mountPane($, surface)
+    expect(await ui.find(text(/^errors · 1$/i))).toBeDefined()
+    await ui.press({ key: 'toggle-errors' })
+    expect(await ui.find(text(/^Bash$/))).toBeDefined()
+    expect(await ui.find(text(/^old failure$/))).toBeDefined()
+    await ui.unmount()
   })
 
   test(`tasks show live and final elapsed time, on ${surface}`, async ($, on) => {
@@ -250,11 +359,12 @@ for (const surface of SURFACES) {
     const ui = await mountPane($, surface)
     expect(await ui.find(text(/^Working 3m 12s · context 34%$/))).toBeDefined()
     const band = await $.ui.mount({ ...BAND, surface })
-    expect(await band.find(text(/3m 12s/))).toBeDefined()
+    expect(await band.find(text(/^3m 12s$/))).toBeDefined()
 
     await $.turn.complete(turnEnd('answer'))
     expect(await ui.find(text(/^Working /))).toBeUndefined()
-    expect(await band.find(text(/3m 12s/))).toBeUndefined()
+    expect(await band.find(text(/^3m 12s$/))).toBeUndefined()
+    expect(await band.find(text(/^Done in 3m 12s$/))).toBeDefined()
     expect(await ui.find(text(/context 34%/))).toBeDefined()
 
     await clock.settle()
@@ -296,7 +406,7 @@ for (const surface of SURFACES) {
     await ui.unmount()
   })
 
-  test(`the timeline keeps the last ten calls, on ${surface}`, async ($, on) => {
+  test(`the timeline shows the last six calls, on ${surface}`, async ($, on) => {
     const { clock } = boot(on)
     await $.session.start({ cwd: '/', surface, isInteractive: true })
     await $.tool.call({ tool: 'Bash', command: 'npm test', description: 'npm test' })
@@ -306,12 +416,163 @@ for (const surface of SURFACES) {
 
     const ui = await mountPane($, surface)
     expect(await ui.find(text(/^Edit t10\.ts$/))).toBeDefined()
-    expect(await ui.find(text(/^Edit t1\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^Edit t5\.ts$/))).toBeDefined()
+    expect(await ui.find(text(/^Edit t4\.ts$/))).toBeUndefined()
     expect(await ui.find(text(/^Bash: npm test$/))).toBeUndefined()
     expect(await ui.find(text(/^2m ago$/))).toBeDefined()
     await ui.unmount()
   })
+
+  test(`a turn that ends with nothing to ask or wait for reads Done in its time, and the wrap-up closes the plan, on ${surface}`, async ($, on) => {
+    const { clock } = boot(on, { hasEngineRow: true })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await callMcp($, 'mcp__ccd_turn__update_plan', { items: ITEMS, scope: 'first_task' })
+    await callMcp($, 'mcp__ccd_turn__update_plan', { advance: true })
+    await clock.advance(72_000)
+    await callMcp($, WRAP_UP)
+    await $.turn.complete(turnEnd('answer'))
+
+    const ui = await mountPane($, surface)
+    expect(await ui.find(text(/Done in 1m 12s/))).toBeDefined()
+    expect(await ui.find(text(/4 of 4 done · 100%/))).toBeDefined()
+    expect(await ui.find(text(/waiting for/i))).toBeUndefined()
+    if (surface === 'desktop') expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('done')
+    await ui.unmount()
+
+    const band = await $.ui.mount({ ...BAND, surface })
+    expect(await band.find(text(/^Done in 1m 12s$/))).toBeDefined()
+    expect(await band.find(text(/^Plan 4\/4 · 100%$/))).toBeDefined()
+    expect(await band.find(text(/waiting for/i))).toBeUndefined()
+    await band.unmount()
+  })
+
+  test(`a wrap-up that asks or is blocked keeps the turn waiting for the decision, on ${surface}`, async ($, on) => {
+    boot(on, { hasEngineRow: true })
+    await $.session.start({ cwd: '/', surface, isInteractive: true })
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await callMcp($, WRAP_UP, { ask: 'Ship it?' })
+    await $.turn.complete(turnEnd('answer'))
+
+    const ui = await mountPane($, surface)
+    const band = await $.ui.mount({ ...BAND, surface })
+    expect(await ui.find(text(/Waiting for your decision: Ship it\?/))).toBeDefined()
+    expect(await band.find(text(/^Waiting for your decision: Ship it\?$/))).toBeDefined()
+    expect(await band.find(text(/Done/))).toBeUndefined()
+
+    await $.turn.start({ text: 'ok', turnId: 't2' })
+    await callMcp($, WRAP_UP, { blocked: true })
+    await $.turn.complete(turnEnd('answer'))
+    expect(await band.find(text(/^Waiting for your decision: your decision$/))).toBeDefined()
+    await ui.unmount()
+    await band.unmount()
+  })
 }
+
+test('cleanError parses the exit code and keeps one clean line', () => {
+  expect(cleanError('Exit code 1 he query \uFFFD\uFFFD\uFFFD\uFFFD\uFFFD he-IL total 23')).toEqual({ code: 1, text: 'he query he-IL total 23' })
+  expect(cleanError('Exit code 2\n/usr/bin/bash: -c: line 169: unexpected EOF')).toEqual({ code: 2, text: '/usr/bin/bash: -c: line 169: unexpected EOF' })
+  expect(cleanError('\u001b[31mError:\u001b[0m\u0007 no such file\r\nat main.js:1')).toEqual({ text: 'Error: no such file' })
+  expect(cleanError('Exit code 1\n\n  \uFFFD\uFFFD \n---\nreal cause here\nmore')).toEqual({ code: 1, text: 'real cause here' })
+  expect(cleanError('Exit code 3')).toEqual({ code: 3, text: '' })
+  expect(cleanError('x'.repeat(300)).text).toHaveLength(160)
+})
+
+test('errorTitle names what failed from the call, by tool', () => {
+  expect(errorTitle('Bash', { command: 'npm test', description: 'Run the tests' })).toBe('Run the tests')
+  expect(errorTitle('PowerShell', { command: `git ${'status '.repeat(30)}` }).length).toBeLessThanOrEqual(80)
+  expect(errorTitle('Bash', { command: 'npm test' })).toBe('npm test')
+  expect(errorTitle('Edit', { file_path: 'C:\\proj\\src\\a.ts' })).toBe('a.ts')
+  expect(errorTitle('Read', { file_path: '/src/b.ts' })).toBe('b.ts')
+  expect(errorTitle('NotebookEdit', { notebook_path: '/n/c.ipynb' })).toBe('c.ipynb')
+  expect(errorTitle('Grep', { pattern: 'TODO' })).toBe('TODO')
+  expect(errorTitle('Glob', { pattern: '**/*.ts' })).toBe('**/*.ts')
+  expect(errorTitle('mcp__chrome-devtools__click', { uid: '1' })).toBe('click')
+  expect(errorTitle('WebFetch', {})).toBe('WebFetch')
+})
+
+test('splitFiles keeps project files relative, folds scratch files and leaves other files short', () => {
+  expect(relativeDir('E:\\dev\\app', 'e:/dev/app/src/domain/user.ts')).toBe('src/domain')
+  expect(relativeDir('E:\\dev\\app\\', 'E:\\dev\\app\\readme.md')).toBe('')
+  expect(relativeDir('E:\\dev\\app', 'E:\\dev\\application\\x.ts')).toBeUndefined()
+  expect(relativeDir('/', '/src/app/a.ts')).toBe('src/app')
+  expect(relativeDir('/home/me/app', '/home/ME/app/a.ts')).toBeUndefined()
+
+  expect(isScratch('C:\\Users\\ME~1\\AppData\\Local\\Temp\\claude\\x.py')).toBe(true)
+  expect(isScratch('/tmp/x.ts')).toBe(true)
+  expect(isScratch('/home/me/.claude/scratchpad/x.ts')).toBe(true)
+  expect(isScratch('/home/me/app/tmpfile.ts')).toBe(false)
+
+  const paths = ['/work/app/src/a.ts', '/work/app/tmp/b.ts', '/tmp/c.ts', 'D:\\other\\deep\\er\\than\\that\\d.ts']
+  expect(splitFiles(paths, '/work/app')).toEqual({
+    rows: [
+      { name: 'a.ts', dir: 'src' },
+      { name: 'b.ts', dir: 'tmp' },
+      { name: 'd.ts', dir: '…/er/than/that' },
+    ],
+    scratch: 1,
+  })
+  expect(splitFiles(['/work/app/src/a.ts'], null).rows).toEqual([{ name: 'a.ts', dir: '…/work/app/src' }])
+})
+
+test('a turn with no recorded start reads plain Done', async ($, on) => {
+  boot(on, { hasEngineRow: true })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.complete(turnEnd('answer'))
+
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await band.find(text(/^Done$/))).toBeDefined()
+  await band.unmount()
+})
+
+test('wrapUp closes every waiting and in-progress step and leaves done and failed ones alone', () => {
+  const list: Task[] = [
+    { id: 'a', title: 'A', status: 'done', startedAt: 1, endedAt: 2 },
+    { id: 'b', title: 'B', status: 'failed', startedAt: 2, endedAt: 3 },
+    { id: 'c', title: 'C', status: 'in_progress', startedAt: 3 },
+    { id: 'd', title: 'D', status: 'waiting' },
+  ]
+
+  expect(wrapUp(list, 9)).toEqual([
+    list[0],
+    list[1],
+    { id: 'c', title: 'C', status: 'done', startedAt: 3, endedAt: 9 },
+    { id: 'd', title: 'D', status: 'done', endedAt: 9 },
+  ])
+})
+
+test('wrap_up closes the whole plan but keeps a failed step failed', async ($, on) => {
+  const { toasts, clock } = boot(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await callMcp($, 'mcp__ccd_turn__update_plan', { items: ITEMS, scope: 'first_task' })
+  await callMcp($, 'mcp__ccd_turn__update_plan', { advance: true })
+  await callMcp($, 'mcp__work-status__mark_task', { step: 3, status: 'failed' })
+  await callMcp($, WRAP_UP)
+  await clock.settle()
+
+  for (const surface of SURFACES) {
+    const ui = await mountPane($, surface)
+    expect(await ui.find(text(/3 of 4 done · 1 failed · 75%/))).toBeDefined()
+    await ui.unmount()
+  }
+
+  expect(toasts).toEqual([])
+})
+
+test('wrap_up that finishes the plan notifies once, however often it is called', async ($, on) => {
+  const { toasts, notes, clock } = boot(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await callMcp($, 'mcp__ccd_turn__update_plan', { items: ITEMS, scope: 'first_task' })
+  await callMcp($, WRAP_UP)
+  await callMcp($, WRAP_UP)
+  await clock.settle()
+
+  const ui = await mountPane($, 'desktop')
+  expect(await ui.find(text(/4 of 4 done · 100%/))).toBeDefined()
+  await ui.unmount()
+  expect(toasts).toEqual(['All tasks are done'])
+  expect(notes.length).toBe(1)
+})
 
 test('it notifies when the plan completes or the turn errors, never for a wait on the person', async ($, on) => {
   const { toasts, notes, clock } = boot(on)

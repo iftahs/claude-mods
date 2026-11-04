@@ -12,6 +12,7 @@ export type ProcGroup = {
   id: string
   kind: ProcGroupKind
   title: string
+  label?: string
   pid: number
   startedAt: number | null
   rss: number
@@ -34,13 +35,22 @@ export type HistoryPoint = {
   rss: number
 }
 
+export type LabelRecord = {
+  tool: 'Bash' | 'PowerShell'
+  command: string
+  label: string
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'session-procs': {
       snapshot: Snapshot | null
       history: HistoryPoint[]
+      labels: LabelRecord[]
       showHelpers: boolean
       isPaneOpen: boolean
+      theme: 'dark' | 'light' | null
       error: string | null
     }
   }
