@@ -954,7 +954,7 @@ describe('band', () => {
 describe('command labels', () => {
   const described: [string, string | undefined][] = [
     ['npx expo start --port 8081', 'Expo dev server'],
-    ['cd "/e/dev-projects/Movies App/app" && npx expo start --port 8081', 'Expo dev server · Movies App/app'],
+    ['cd "/e/projects/My App/app" && npx expo start --port 8081', 'Expo dev server · My App/app'],
     ["cd 'E:\\dev\\site'; npm run dev", 'npm script: dev · dev/site'],
     ['cd app && pnpm exec next dev -p 3001', 'Next.js dev server · app'],
     ['npx --yes vite', 'Vite dev server'],
@@ -1063,10 +1063,10 @@ describe('command labels', () => {
   })
 
   test('a label from the call gets the cd context and wins over the heuristic', () => {
-    const command = 'cd "/e/dev-projects/Movies App/app" && npx expo start --port 8081'
+    const command = 'cd "/e/projects/My App/app" && npx expo start --port 8081'
     const group = toolGroup(`$ ${command}`)
-    expect(labelled([group], [record(command, 'Start Expo dev server', T0 + 9_000)])).toEqual(['Start Expo dev server · Movies App/app'])
-    expect(labelled([group], [])).toEqual(['Expo dev server · Movies App/app'])
+    expect(labelled([group], [record(command, 'Start Expo dev server', T0 + 9_000)])).toEqual(['Start Expo dev server · My App/app'])
+    expect(labelled([group], [])).toEqual(['Expo dev server · My App/app'])
   })
 
   test('a title the 300-character cap cut still finds its record by prefix', () => {
@@ -1089,7 +1089,7 @@ describe('command labels', () => {
   test('matches the commands Claude Code really hands to bash on Windows', () => {
     const commands = [
       'sleep 120',
-      'cd "/e/dev-projects/claude-mods" && sleep 121 && echo "it\'s \\"done\\""',
+      'cd "/e/projects/demo" && sleep 121 && echo "it\'s \\"done\\""',
       '  echo "line one" && \\\n  sleep 122 | cat\nsleep 123 2>&1   ',
       'echo "a\\\\" "b" \'c d\' $HOME',
       'git commit -m "fix \\"x\\" in C:\\\\dir"',
@@ -1104,8 +1104,8 @@ describe('command labels', () => {
   })
 
   test('a command line captured from a real Windows session reads back as the typed command', () => {
-    const captured = String.raw`"C:\Program Files\Git\bin\bash.exe" -c "source '/c/Users/me/.claude/shell-snapshots/snapshot-bash-1793747145807-84fxwb.sh' 2>/dev/null || true && export TEMP='C:\Users\me\AppData\Local\Temp' TMP='C:\Users\me\AppData\Local\Temp' && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd \"/e/dev-projects/claude-mods\" && sleep 121 && echo \"it'\"'\"'s \\\"done\\\"\"' < /dev/null && pwd -P >| '/c/Users/me/AppData/Local/Temp/claude-5d45-cwd'"`
-    expect(toolShellTitle(proc(1, 0, 'bash.exe', captured))).toBe('$ cd "/e/dev-projects/claude-mods" && sleep 121 && echo "it\'s \\"done\\""')
+    const captured = String.raw`"C:\Program Files\Git\bin\bash.exe" -c "source '/c/Users/me/.claude/shell-snapshots/snapshot-bash-1793747145807-84fxwb.sh' 2>/dev/null || true && export TEMP='C:\Users\me\AppData\Local\Temp' TMP='C:\Users\me\AppData\Local\Temp' && shopt -u extglob 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'cd \"/e/projects/demo\" && sleep 121 && echo \"it'\"'\"'s \\\"done\\\"\"' < /dev/null && pwd -P >| '/c/Users/me/AppData/Local/Temp/claude-5d45-cwd'"`
+    expect(toolShellTitle(proc(1, 0, 'bash.exe', captured))).toBe('$ cd "/e/projects/demo" && sleep 121 && echo "it\'s \\"done\\""')
   })
 
   test('a PowerShell group takes the newest PowerShell record within five seconds before it started', () => {

@@ -498,7 +498,7 @@ test('splitFiles keeps project files relative, folds scratch files and leaves ot
   expect(relativeDir('/', '/src/app/a.ts')).toBe('src/app')
   expect(relativeDir('/home/me/app', '/home/ME/app/a.ts')).toBeUndefined()
 
-  expect(isScratch('C:\\Users\\IFTAHS~1\\AppData\\Local\\Temp\\claude\\x.py')).toBe(true)
+  expect(isScratch('C:\\Users\\ME~1\\AppData\\Local\\Temp\\claude\\x.py')).toBe(true)
   expect(isScratch('/tmp/x.ts')).toBe(true)
   expect(isScratch('/home/me/.claude/scratchpad/x.ts')).toBe(true)
   expect(isScratch('/home/me/app/tmpfile.ts')).toBe(false)

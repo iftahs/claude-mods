@@ -17,7 +17,7 @@ The screenshots use demo data. The wider layout, with PID and memory-meter colum
 
 ## What it shows
 
-- **Started by tools**: each Bash or PowerShell command Claude ran, with a plain-words label (`Start Expo dev server · Movies App/app`) above the full command (`$ cd "…/app" && npx expo start`), wrapped over up to eight lines instead of cut short, and the processes under it (`node …/bin/next dev`) with PID, memory and age. The label is the description Claude gave the tool call. When there is none, the mod names well-known dev tools from the command (Expo, Next.js, Vite, `npm run <script>`, Vitest, Docker Compose and more) and shows no label for anything else.
+- **Started by tools**: each Bash or PowerShell command Claude ran, with a plain-words label (`Start Expo dev server · My App/app`) above the full command (`$ cd "…/app" && npx expo start`), wrapped over up to eight lines instead of cut short, and the processes under it (`node …/bin/next dev`) with PID, memory and age. The label is the description Claude gave the tool call. When there is none, the mod names well-known dev tools from the command (Expo, Next.js, Vite, `npm run <script>`, Vitest, Docker Compose and more) and shows no label for anything else.
 - **Detached**: processes that kept running after the shell that started them exited, labelled the same way when the command is a known dev tool.
 - **MCP servers & helpers**: the session's MCP servers and other helpers, behind a toggle.
 - **Stat tiles** for running processes, helpers, total memory and session uptime, with sparklines.

@@ -170,7 +170,7 @@ describe('svg cards', () => {
   })
 
   describe('long commands', () => {
-    const LONG = '$ cd "/e/dev-projects/Movies App/app" && npx expo start --port 8081 --clear --offline --host lan --scheme movies'
+    const LONG = '$ cd "/e/projects/My App/app" && npx expo start --port 8081 --clear --offline --host lan --scheme movies'
     const CARD = { title: 'Started by tools', takenAt: T0, emptyTitle: 'x', emptyHint: 'y' }
     const group = (title: string, extra: Partial<ProcGroup> = {}): ProcGroup => ({
       id: 'tool-9',
@@ -222,12 +222,12 @@ describe('svg cards', () => {
     })
 
     test('a label takes the first line and the command wraps in mono below it', () => {
-      const one = groupsCard({ ...CARD, groups: [group(LONG, { label: 'Start Expo dev server · Movies App/app' })], width: 720 })
-      expect(one.source).toContain('font-weight="600">Start Expo dev server · Movies App/app</text>')
+      const one = groupsCard({ ...CARD, groups: [group(LONG, { label: 'Start Expo dev server · My App/app' })], width: 720 })
+      expect(one.source).toContain('font-weight="600">Start Expo dev server · My App/app</text>')
       expect(commandLines(one.source).length).toBeGreaterThan(1)
       expect(one.source).toMatch(/class="mono muted" font-size="12">\$ cd/)
       expect(words(commandLines(one.source))).toEqual(LONG.split(' '))
-      expect(one.alt).toBe(`Started by tools: Start Expo dev server · Movies App/app - ${LONG}`)
+      expect(one.alt).toBe(`Started by tools: Start Expo dev server · My App/app - ${LONG}`)
       const plain = groupsCard({ ...CARD, groups: [group(LONG)], width: 720 })
       expect(plain.source).not.toContain('>Start Expo')
       expect(plain.source).toMatch(/class="mono fg" font-size="13">\$ cd/)
